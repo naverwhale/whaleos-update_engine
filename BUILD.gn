@@ -25,18 +25,13 @@ import("//common-mk/proto_library.gni")
 import("//update_engine/tar_bunzip2.gni")
 
 group("all") {
-  deps = [
-    ":delta_generator",
-    ":libpayload_consumer",
-    ":libpayload_generator",
-    ":libupdate_engine",
-    ":libupdate_engine_client",
-    ":update_engine",
-    ":update_engine-dbus-adaptor",
-    ":update_engine-dbus-kiosk-app-client",
-    ":update_engine_client",
-    ":update_metadata-protos",
-  ]
+  deps = [ ":delta_generator" ]
+  if (!use.cros_host) {
+    deps += [
+      ":update_engine",
+      ":update_engine_client",
+    ]
+  }
 
   if (use.test) {
     deps += [
@@ -61,7 +56,7 @@ group("all") {
 pkg_config("target_defaults") {
   cflags_cc = [
     "-fno-strict-aliasing",
-    "-Wnon-virtual-dtor",
+    "-Wdelete-non-virtual-dtor",
   ]
   cflags = [ "-ffunction-sections" ]
   ldflags = [ "-Wl,--gc-sections" ]
@@ -71,8 +66,10 @@ pkg_config("target_defaults") {
     "_POSIX_C_SOURCE=199309L",
     "USE_CFM=${use.cfm}",
     "USE_FEC=0",
-    "USE_HW_DETAILS=${use.hw_details}",
     "USE_HWID_OVERRIDE=${use.hwid_override}",
+    "USE_HW_DETAILS=${use.hw_details}",
+    "USE_REPORT_REQUISITION=${use.report_requisition}",
+    "USE_LVM_STATEFUL_PARTITION=${use.lvm_stateful_partition}",
   ]
   include_dirs = [
     # We need this include dir because we include all the local code as
@@ -169,6 +166,7 @@ static_library("libpayload_consumer") {
   all_dependent_pkg_deps = [
     "libbspatch",
     "libcrypto",
+    "libimageloader-manifest",
     "libpuffpatch",
     "xz-embedded",
   ]
@@ -180,6 +178,7 @@ static_library("libpayload_consumer") {
 static_library("libupdate_engine") {
   sources = [
     "certificate_checker.cc",
+    "common/call_wrapper.cc",
     "common/connection_utils.cc",
     "common/system_state.cc",
     "cros/boot_control_chromeos.cc",
@@ -191,6 +190,7 @@ static_library("libupdate_engine") {
     "cros/download_action_chromeos.cc",
     "cros/hardware_chromeos.cc",
     "cros/image_properties_chromeos.cc",
+    "cros/install_action.cc",
     "cros/logging.cc",
     "cros/metrics_reporter_omaha.cc",
     "cros/omaha_parser_data.cc",
@@ -211,10 +211,13 @@ static_library("libupdate_engine") {
     "metrics_utils.cc",
     "update_boot_flags_action.cc",
     "update_manager/boxed_value.cc",
+    "update_manager/deferred_update_policy_impl.cc",
     "update_manager/enough_slots_ab_updates_policy_impl.cc",
     "update_manager/enterprise_device_policy_impl.cc",
     "update_manager/enterprise_rollback_policy_impl.cc",
+    "update_manager/enterprise_update_disabled_policy_impl.cc",
     "update_manager/evaluation_context.cc",
+    "update_manager/installation_policy_impl.cc",
     "update_manager/interactive_update_policy_impl.cc",
     "update_manager/minimum_version_policy_impl.cc",
     "update_manager/next_update_check_policy_impl.cc",
@@ -238,6 +241,7 @@ static_library("libupdate_engine") {
     "update_manager/update_can_be_applied_policy.cc",
     "update_manager/update_can_start_policy.cc",
     "update_manager/update_check_allowed_policy.cc",
+    "update_manager/update_in_hibernate_resume_policy_impl.cc",
     "update_manager/update_manager.cc",
     "update_manager/update_time_restrictions_monitor.cc",
     "update_manager/update_time_restrictions_policy_impl.cc",
@@ -254,8 +258,10 @@ static_library("libupdate_engine") {
   all_dependent_pkg_deps = [
     "dbus-1",
     "expat",
+    "libcrossystem",
     "libcurl",
     "libdebugd-client",
+    "libenterprise_rollback_metrics",
     "libmetrics",
     "libpower_manager-client",
     "libsession_manager-client",
@@ -264,6 +270,7 @@ static_library("libupdate_engine") {
     "libupdate_engine-client",
     "vboot_host",
   ]
+  pkg_deps = [ "re2" ]
   deps = [
     ":libpayload_consumer",
     ":update_engine-dbus-adaptor",
@@ -272,10 +279,14 @@ static_library("libupdate_engine") {
   ]
 
   if (use.hw_details) {
-    deps += [ "//diagnostics/mojo:cros_healthd_mojo_bindings" ]
     sources += [
       "common/cros_healthd.cc",
       "common/telemetry_info.cc",
+    ]
+    pkg_deps += [
+      "cros_healthd-client",
+      "libmojo",
+      "mojo_service_manager",
     ]
   } else {
     sources += [
@@ -285,7 +296,17 @@ static_library("libupdate_engine") {
   }
 
   if (use.dlc) {
-    all_dependent_pkg_deps += [ "libdlcservice-client" ]
+    all_dependent_pkg_deps += [
+      "libdlcservice-client",
+      "libdlcservice-utils",
+    ]
+  }
+
+  if (use.hibernate) {
+    sources += [ "cros/hibernate_chromeos.cc" ]
+    all_dependent_pkg_deps += [ "libhibernate-client" ]
+  } else {
+    sources += [ "common/hibernate_stub.cc" ]
   }
 
   if (use.chrome_network_proxy) {
@@ -310,6 +331,7 @@ executable("update_engine") {
   sources = [ "main.cc" ]
   configs += [ ":target_defaults" ]
   deps = [ ":libupdate_engine" ]
+  install_path = "sbin"
 }
 
 # update_engine client library.
@@ -335,6 +357,7 @@ executable("update_engine_client") {
   ]
   configs += [ ":target_defaults" ]
   deps = [ ":libupdate_engine_client" ]
+  install_path = "bin"
 }
 
 # server-side code. This is used for delta_generator and unittests but not
@@ -378,6 +401,7 @@ static_library("libpayload_generator") {
   ]
   deps = [
     ":libpayload_consumer",
+    ":update_engine-dbus-kiosk-app-client",
     ":update_metadata-protos",
   ]
 }
@@ -391,6 +415,7 @@ executable("delta_generator") {
     ":libpayload_consumer",
     ":libpayload_generator",
   ]
+  install_path = "bin"
 }
 
 if (use.test || use.fuzzer) {
@@ -479,6 +504,7 @@ if (use.test) {
       "common/action_processor_unittest.cc",
       "common/action_unittest.cc",
       "common/cpu_limiter_unittest.cc",
+      "common/error_code_utils_unittest.cc",
       "common/hash_calculator_unittest.cc",
       "common/http_fetcher_unittest.cc",
       "common/hwid_override_unittest.cc",
@@ -494,6 +520,7 @@ if (use.test) {
       "cros/download_action_chromeos_unittest.cc",
       "cros/hardware_chromeos_unittest.cc",
       "cros/image_properties_chromeos_unittest.cc",
+      "cros/install_action_test.cc",
       "cros/metrics_reporter_omaha_unittest.cc",
       "cros/omaha_request_action_unittest.cc",
       "cros/omaha_request_builder_xml_unittest.cc",
@@ -537,13 +564,16 @@ if (use.test) {
       "payload_generator/zip_unittest.cc",
       "update_boot_flags_action_unittest.cc",
       "update_manager/boxed_value_unittest.cc",
+      "update_manager/deferred_update_policy_impl_unittest.cc",
       "update_manager/enterprise_device_policy_impl_unittest.cc",
       "update_manager/enterprise_rollback_policy_impl_unittest.cc",
+      "update_manager/enterprise_update_disabled_policy_impl_unittest.cc",
       "update_manager/evaluation_context_unittest.cc",
       "update_manager/generic_variables_unittest.cc",
       "update_manager/minimum_version_policy_impl_unittest.cc",
       "update_manager/next_update_check_policy_impl_unittest.cc",
       "update_manager/omaha_request_params_policy_unittest.cc",
+      "update_manager/out_of_box_experience_policy_impl_test.cc",
       "update_manager/p2p_enabled_policy_unittest.cc",
       "update_manager/prng_unittest.cc",
       "update_manager/real_device_policy_provider_unittest.cc",
@@ -556,6 +586,7 @@ if (use.test) {
       "update_manager/staging_utils_unittest.cc",
       "update_manager/update_can_start_policy_unittest.cc",
       "update_manager/update_check_allowed_policy_unittest.cc",
+      "update_manager/update_in_hibernate_resume_policy_impl_unittest.cc",
       "update_manager/update_manager_unittest.cc",
       "update_manager/update_time_restrictions_monitor_unittest.cc",
       "update_manager/update_time_restrictions_policy_impl_unittest.cc",
@@ -563,12 +594,6 @@ if (use.test) {
       "update_manager/weekly_time_unittest.cc",
       "update_status_utils_unittest.cc",
     ]
-    if (use.hw_details) {
-      sources += [ "common/cros_healthd_test.cc" ]
-    }
-    if (use.dlc) {
-      sources += [ "cros/excluder_chromeos_unittest.cc" ]
-    }
 
     # //common-mk:test should be on the top.
     # TODO(crbug.com/887845): Remove this after library odering issue is fixed.
@@ -579,7 +604,9 @@ if (use.test) {
     pkg_deps = [
       "libbrillo-test",
       "libchrome-test",
+      "libcrossystem-test",
       "libdebugd-client-test",
+      "libenterprise_rollback_metrics-test",
       "libpower_manager-client-test",
       "libsession_manager-client-test",
       "libshill-client-test",
@@ -589,6 +616,18 @@ if (use.test) {
       ":libupdate_engine",
       ":update_engine_test_libs",
     ]
+
+    if (use.hw_details) {
+      sources += [ "common/cros_healthd_test.cc" ]
+      pkg_deps += [
+        "cros_healthd-client",
+        "libmojo",
+        "mojo_service_manager",
+      ]
+    }
+    if (use.dlc) {
+      sources += [ "cros/excluder_chromeos_unittest.cc" ]
+    }
   }
 }
 

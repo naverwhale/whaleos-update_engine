@@ -50,9 +50,10 @@ class MockUpdateAttempter : public UpdateAttempter {
               (const update_engine::UpdateParams&),
               (override));
 
-  MOCK_METHOD2(CheckForInstall,
+  MOCK_METHOD3(CheckForInstall,
                bool(const std::vector<std::string>& dlc_ids,
-                    const std::string& omaha_url));
+                    const std::string& omaha_url,
+                    bool scaled));
 
   MOCK_METHOD2(SetDlcActiveValue, bool(bool, const std::string&));
 
@@ -63,6 +64,8 @@ class MockUpdateAttempter : public UpdateAttempter {
   MOCK_CONST_METHOD0(consecutive_failed_update_checks, unsigned int(void));
 
   MOCK_CONST_METHOD0(server_dictated_poll_interval, unsigned int(void));
+
+  MOCK_METHOD0(IsRepeatedUpdatesEnabled, bool(void));
 };
 
 }  // namespace chromeos_update_engine

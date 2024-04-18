@@ -25,7 +25,7 @@
 #include <cstdlib>
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
 #include <brillo/data_encoding.h>
@@ -194,10 +194,10 @@ void FilesystemVerifierAction::ScheduleRead() {
   bool read_async_ok = src_stream_->ReadAsync(
       buffer_.data(),
       bytes_to_read,
-      base::Bind(&FilesystemVerifierAction::OnReadDoneCallback,
-                 base::Unretained(this)),
-      base::Bind(&FilesystemVerifierAction::OnReadErrorCallback,
-                 base::Unretained(this)),
+      base::BindOnce(&FilesystemVerifierAction::OnReadDoneCallback,
+                     base::Unretained(this)),
+      base::BindOnce(&FilesystemVerifierAction::OnReadErrorCallback,
+                     base::Unretained(this)),
       nullptr);
 
   if (!read_async_ok) {

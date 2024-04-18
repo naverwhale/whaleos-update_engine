@@ -24,7 +24,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <base/time/time.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
@@ -63,6 +62,9 @@ class OmahaRequestParams {
 
   struct AppParams {
     ActiveCountingType active_counting_type;
+    // `critical_update` DLCs update with the OS, and will not be excluded if
+    // encountered error.
+    bool critical_update = false;
     // |name| is only used for DLCs to store the DLC ID.
     std::string name;
     int64_t ping_active;
@@ -178,6 +180,18 @@ class OmahaRequestParams {
   inline int rollback_allowed_milestones() const {
     return rollback_allowed_milestones_;
   }
+
+  inline void set_activate_date(const std::string& activate_date) {
+    activate_date_ = activate_date;
+  }
+
+  inline std::string activate_date() const { return activate_date_; }
+
+  inline void set_fsi_version(const std::string& fsi_version) {
+    fsi_version_ = fsi_version;
+  }
+
+  inline std::string fsi_version() const { return fsi_version_; }
 
   inline void set_wall_clock_based_wait_enabled(bool enabled) {
     wall_clock_based_wait_enabled_ = enabled;
@@ -310,6 +324,10 @@ class OmahaRequestParams {
   // autoupdate server or the autoupdate autotest server.
   virtual bool IsUpdateUrlOfficial() const;
 
+  // IsCommercialChannel returns true if `channel` is a channel only supported
+  // on enrolled devices.
+  static bool IsCommercialChannel(const std::string& channel);
+
   // For unit-tests.
   void set_root(const std::string& root);
   void set_current_channel(const std::string& channel) {
@@ -426,6 +444,12 @@ class OmahaRequestParams {
   // roll-forward should happen.
   // Normally ss set by |OmahaRequestParamsPolicy|.
   int rollback_allowed_milestones_;
+
+  // FSI OS version of this device, as read from VPD.
+  std::string fsi_version_;
+
+  // Activate date in the form of "2023-04" of this device, as read from VPD.
+  std::string activate_date_;
 
   // True if scattering or staging are enabled, in which case waiting_period_
   // specifies the amount of absolute time that we've to wait for before sending

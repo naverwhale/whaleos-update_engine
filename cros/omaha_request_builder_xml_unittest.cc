@@ -20,12 +20,11 @@
 #include <utility>
 #include <vector>
 
-#include <base/guid.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
+#include <base/uuid.h>
 #include <gtest/gtest.h>
 
-#include "update_engine/common/mock_cros_healthd.h"
 #include "update_engine/cros/fake_system_state.h"
 
 using std::pair;
@@ -66,6 +65,10 @@ class OmahaRequestBuilderXmlTest : public ::testing::Test {
     FakeSystemState::CreateInstance();
     params_.set_hw_details(false);
     FakeSystemState::Get()->set_request_params(&params_);
+
+    ON_CALL(*FakeSystemState::Get()->mock_update_attempter(),
+            IsRepeatedUpdatesEnabled())
+        .WillByDefault(Return(true));
   }
   void TearDown() override {}
 
@@ -101,13 +104,7 @@ TEST_F(OmahaRequestBuilderXmlTest, XmlEncodeWithDefaultTest) {
 
 TEST_F(OmahaRequestBuilderXmlTest, PlatformGetAppTest) {
   params_.set_device_requisition("device requisition");
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   OmahaAppData dlc_app_data = {.id = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
                                .version = "",
                                .skip_update = false,
@@ -122,7 +119,7 @@ TEST_F(OmahaRequestBuilderXmlTest, PlatformGetAppTest) {
 TEST_F(OmahaRequestBuilderXmlTest, GetLastFpTest) {
   params_.set_device_requisition("device requisition");
   params_.set_last_fp("1.75");
-  FakeSystemState::Get()->update_attempter()->ChangeRepeatedUpdates(true);
+  utils::ToggleFeature(kPrefsAllowRepeatedUpdates, true);
   OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   OmahaAppData dlc_app_data = {.id = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
                                .version = "",
@@ -137,13 +134,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetLastFpTest) {
 
 TEST_F(OmahaRequestBuilderXmlTest, DlcGetAppTest) {
   params_.set_device_requisition("device requisition");
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   OmahaAppData dlc_app_data = {
       .id = "_dlc_id", .version = "", .skip_update = false, .is_dlc = true};
 
@@ -153,51 +144,69 @@ TEST_F(OmahaRequestBuilderXmlTest, DlcGetAppTest) {
   EXPECT_EQ(string::npos, app.find("requisition="));
 }
 
+TEST_F(OmahaRequestBuilderXmlTest, GetNotRunningMiniOS) {
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  const string isminios =
+      FindAttributeKeyValueInXml(request_xml, "isminios", 1);
+  EXPECT_TRUE(isminios.empty());
+}
+
+TEST_F(OmahaRequestBuilderXmlTest, GetRunningMiniOS) {
+  FakeSystemState::Get()->fake_hardware()->SetIsRunningFromMiniOs(true);
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  const string isminios =
+      FindAttributeKeyValueInXml(request_xml, "isminios", 1);
+  EXPECT_EQ("1", isminios);
+}
+
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlRequestIdTest) {
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   const string key = "requestid";
   const string request_id =
       FindAttributeKeyValueInXml(request_xml, key, kGuidSize);
   // A valid |request_id| is either a GUID version 4 or empty string.
   if (!request_id.empty())
-    EXPECT_TRUE(base::IsValidGUID(request_id));
+    EXPECT_TRUE(base::Uuid::ParseLowercase(request_id).is_valid());
 }
 
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlSessionIdTest) {
-  const string gen_session_id = base::GenerateGUID();
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       gen_session_id};
+  const string gen_session_id =
+      base::Uuid::GenerateRandomV4().AsLowercaseString();
+  OmahaRequestBuilderXml omaha_request{
+      nullptr, false, false, 0, 0, 0, gen_session_id};
   const string request_xml = omaha_request.GetRequest();
   const string key = "sessionid";
   const string session_id =
       FindAttributeKeyValueInXml(request_xml, key, kGuidSize);
   // A valid |session_id| is either a GUID version 4 or empty string.
   if (!session_id.empty()) {
-    EXPECT_TRUE(base::IsValidGUID(session_id));
+    EXPECT_TRUE(base::Uuid::ParseLowercase(session_id).is_valid());
   }
   EXPECT_EQ(gen_session_id, session_id);
 }
 
+TEST_F(OmahaRequestBuilderXmlTest, GetRecoveryKeyVersionMissing) {
+  FakeSystemState::Get()->fake_hardware()->SetRecoveryKeyVersion("");
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(1, CountSubstringInString(request_xml, "recoverykeyversion=\"\""))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest, GetRecoveryKeyVersion) {
+  FakeSystemState::Get()->fake_hardware()->SetRecoveryKeyVersion("123");
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  const string recovery_key_version =
+      FindAttributeKeyValueInXml(request_xml, "recoverykeyversion", 3);
+  EXPECT_EQ("123", recovery_key_version) << request_xml;
+}
+
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlPlatformUpdateTest) {
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   EXPECT_EQ(1, CountSubstringInString(request_xml, "<updatecheck"))
       << request_xml;
@@ -207,13 +216,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlPlatformUpdateWithDlcsTest) {
   params_.set_dlc_apps_params(
       {{params_.GetDlcAppId("dlc_no_0"), {.name = "dlc_no_0"}},
        {params_.GetDlcAppId("dlc_no_1"), {.name = "dlc_no_1"}}});
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   EXPECT_EQ(3, CountSubstringInString(request_xml, "<updatecheck"))
       << request_xml;
@@ -225,13 +228,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcInstallationTest) {
       {params_.GetDlcAppId("dlc_no_1"), {.name = "dlc_no_1"}}};
   params_.set_dlc_apps_params(dlcs);
   params_.set_is_install(true);
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   EXPECT_EQ(2, CountSubstringInString(request_xml, "<updatecheck"))
       << request_xml;
@@ -255,6 +252,17 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcInstallationTest) {
   }
 }
 
+TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlMiniOsTestForInstallations) {
+  FakeSystemState::Get()->fake_boot_control()->SetSupportsMiniOSPartitions(
+      true);
+  params_.set_is_install(true);
+  params_.set_minios_app_params({});
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(0, CountSubstringInString(request_xml, "<updatecheck"))
+      << request_xml;
+}
+
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlMiniOsTest) {
   FakeSystemState::Get()->fake_boot_control()->SetSupportsMiniOSPartitions(
       true);
@@ -274,13 +282,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlMiniOsTest) {
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcNoPing) {
   params_.set_dlc_apps_params(
       {{params_.GetDlcAppId("dlc_no_0"), {.name = "dlc_no_0"}}});
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   EXPECT_EQ(0, CountSubstringInString(request_xml, "<ping")) << request_xml;
 }
@@ -293,13 +295,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcPingRollCallNoActive) {
          .ping_date_last_active = 25,
          .ping_date_last_rollcall = 36,
          .send_ping = true}}});
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   EXPECT_EQ(1, CountSubstringInString(request_xml, "<ping rd=\"36\""))
       << request_xml;
@@ -314,13 +310,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcPingRollCallAndActive) {
          .ping_date_last_active = 25,
          .ping_date_last_rollcall = 36,
          .send_ping = true}}});
-  OmahaRequestBuilderXml omaha_request{nullptr,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   EXPECT_EQ(1,
             CountSubstringInString(request_xml,
@@ -329,7 +319,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcPingRollCallAndActive) {
 }
 
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcFp) {
-  FakeSystemState::Get()->update_attempter()->ChangeRepeatedUpdates(true);
+  utils::ToggleFeature(kPrefsAllowRepeatedUpdates, true);
   params_.set_dlc_apps_params({{params_.GetDlcAppId("dlc_no_0"),
                                 {.name = "dlc_no_0", .last_fp = "1.1"}}});
   OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
@@ -339,7 +329,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcFp) {
 }
 
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlMiniOSFp) {
-  FakeSystemState::Get()->update_attempter()->ChangeRepeatedUpdates(true);
+  utils::ToggleFeature(kPrefsAllowRepeatedUpdates, true);
   FakeSystemState::Get()->fake_boot_control()->SetSupportsMiniOSPartitions(
       true);
   params_.set_minios_app_params({.last_fp = "1.2"});
@@ -352,13 +342,7 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlMiniOSFp) {
 
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlUpdateCompleteEvent) {
   OmahaEvent event(OmahaEvent::kTypeUpdateComplete);
-  OmahaRequestBuilderXml omaha_request{&event,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{&event, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   LOG(INFO) << request_xml;
   EXPECT_EQ(
@@ -375,13 +359,7 @@ TEST_F(OmahaRequestBuilderXmlTest,
       {params_.GetDlcAppId("dlc_2"), {.updated = false}},
   });
   OmahaEvent event(OmahaEvent::kTypeUpdateComplete);
-  OmahaRequestBuilderXml omaha_request{&event,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{&event, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   EXPECT_EQ(
       2,
@@ -403,13 +381,7 @@ TEST_F(OmahaRequestBuilderXmlTest,
       {params_.GetDlcAppId("dlc_2"), {.updated = false}},
   });
   OmahaEvent event(OmahaEvent::kTypeUpdateComplete);
-  OmahaRequestBuilderXml omaha_request{&event,
-                                       false,
-                                       false,
-                                       0,
-                                       0,
-                                       0,
-                                       ""};
+  OmahaRequestBuilderXml omaha_request{&event, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
   EXPECT_EQ(
       1,
@@ -498,28 +470,28 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlDlcCohortCheck) {
 
 TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheck) {
   params_.set_hw_details(true);
-  MockCrosHealthd mock_cros_healthd;
-  FakeSystemState::Get()->set_cros_healthd(&mock_cros_healthd);
 
-  const string board_vendor = "fake-board-vendor",
-               board_name = "fake-board-name",
-               board_version = "fake-board-version",
+  const string sys_vendor = "fake-sys-vendor",
+               product_name = "fake-product-name",
+               product_version = "fake-product-version",
                bios_version = "fake-bios-version",
                model_name = "fake-model-name";
-  auto boot_mode = TelemetryInfo::SystemV2Info::OsInfo::BootMode::kCrosEfi;
+  auto boot_mode = TelemetryInfo::SystemInfo::OsInfo::BootMode::kCrosEfi;
   uint32_t total_memory_kib = 123;
   uint64_t size = 456;
 
-  TelemetryInfo telemetry_info{
-      .system_v2_info =
+  FakeSystemState::Get()
+      ->fake_cros_healthd()
+      ->telemetry_info() = std::make_unique<TelemetryInfo>(TelemetryInfo{
+      .system_info =
           // NOLINTNEXTLINE(whitespace/braces)
       {
           .dmi_info =
               // NOLINTNEXTLINE(whitespace/braces)
           {
-              .board_vendor = board_vendor,
-              .board_name = board_name,
-              .board_version = board_version,
+              .sys_vendor = sys_vendor,
+              .product_name = product_name,
+              .product_version = product_version,
               .bios_version = bios_version,
           },
           .os_info =
@@ -559,8 +531,8 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheck) {
                   TelemetryInfo::BusDevice::BusDeviceClass::kWirelessController,
               .bus_type_info =
                   TelemetryInfo::BusDevice::PciBusInfo{
-                      .vendor_id = 1,
-                      .device_id = 2,
+                      .vendor_id = 0x0001,
+                      .device_id = 0x0002,
                       .driver = "fake-driver-1",
                   },
           },
@@ -569,8 +541,8 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheck) {
                   TelemetryInfo::BusDevice::BusDeviceClass::kWirelessController,
               .bus_type_info =
                   TelemetryInfo::BusDevice::UsbBusInfo{
-                      .vendor_id = 3,
-                      .product_id = 4,
+                      .vendor_id = 0x0003,
+                      .product_id = 0x0004,
                   },
           },
           {
@@ -578,8 +550,8 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheck) {
                   TelemetryInfo::BusDevice::BusDeviceClass::kDisplayController,
               .bus_type_info =
                   TelemetryInfo::BusDevice::PciBusInfo{
-                      .vendor_id = 5,
-                      .device_id = 6,
+                      .vendor_id = 0x0005,
+                      .device_id = 0x0006,
                       .driver = "fake-driver-2",
                   },
           },
@@ -588,8 +560,8 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheck) {
                   TelemetryInfo::BusDevice::BusDeviceClass::kDisplayController,
               .bus_type_info =
                   TelemetryInfo::BusDevice::UsbBusInfo{
-                      .vendor_id = 7,
-                      .product_id = 8,
+                      .vendor_id = 0x00AA,
+                      .product_id = 0x1111,
                   },
           },
           // Should be ignored.
@@ -598,8 +570,8 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheck) {
                   TelemetryInfo::BusDevice::BusDeviceClass::kEthernetController,
               .bus_type_info =
                   TelemetryInfo::BusDevice::PciBusInfo{
-                      .vendor_id = 9,
-                      .device_id = 10,
+                      .vendor_id = 0x0009,
+                      .device_id = 0x000A,
                       .driver = "fake-driver-3",
                   },
           },
@@ -608,15 +580,12 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheck) {
                   TelemetryInfo::BusDevice::BusDeviceClass::kEthernetController,
               .bus_type_info =
                   TelemetryInfo::BusDevice::UsbBusInfo{
-                      .vendor_id = 11,
-                      .product_id = 12,
+                      .vendor_id = 0x000B,
+                      .product_id = 0x000C,
                   },
           },
       },
-  };
-
-  EXPECT_CALL(mock_cros_healthd, GetTelemetryInfo())
-      .WillOnce(Return(&telemetry_info));
+  });
 
   OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
   const string request_xml = omaha_request.GetRequest();
@@ -634,19 +603,259 @@ TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheck) {
                                    " cpu_name=\"%s\""
                                    " wireless_drivers=\"%s\""
                                    " wireless_ids=\"%s\""
+                                   " gpu_drivers=\"%s\""
                                    " gpu_ids=\"%s\""
                                    " />\n",
-                                   board_vendor.c_str(),
-                                   board_name.c_str(),
-                                   board_version.c_str(),
+                                   sys_vendor.c_str(),
+                                   product_name.c_str(),
+                                   product_version.c_str(),
                                    bios_version.c_str(),
                                    static_cast<int32_t>(boot_mode),
                                    total_memory_kib,
                                    size,
                                    model_name.c_str(),
                                    "fake-driver-1",
-                                   "0100:0200 0300:0400",
-                                   "0500:0600 0700:0800")))
+                                   "0001:0002 0003:0004",
+                                   "fake-driver-2",
+                                   "0005:0006 00AA:1111")))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheckMultipleGpuDrivers) {
+  params_.set_hw_details(true);
+
+  const string sys_vendor = "fake-sys-vendor",
+               product_name = "fake-product-name",
+               product_version = "fake-product-version",
+               bios_version = "fake-bios-version",
+               model_name = "fake-model-name";
+  auto boot_mode = TelemetryInfo::SystemInfo::OsInfo::BootMode::kCrosEfi;
+  uint32_t total_memory_kib = 123;
+  uint64_t size = 456;
+
+  FakeSystemState::Get()
+      ->fake_cros_healthd()
+      ->telemetry_info() = std::make_unique<TelemetryInfo>(TelemetryInfo{
+      .system_info =
+          // NOLINTNEXTLINE(whitespace/braces)
+      {
+          .dmi_info =
+              // NOLINTNEXTLINE(whitespace/braces)
+          {
+              .sys_vendor = sys_vendor,
+              .product_name = product_name,
+              .product_version = product_version,
+              .bios_version = bios_version,
+          },
+          .os_info =
+              // NOLINTNEXTLINE(whitespace/braces)
+          {
+              .boot_mode = boot_mode,
+          },
+      },
+      .memory_info =
+          // NOLINTNEXTLINE(whitespace/braces)
+      {
+          .total_memory_kib = total_memory_kib,
+      },
+      .block_device_info =
+          // NOLINTNEXTLINE(whitespace/braces)
+      {
+          {
+              .size = size,
+          },
+      },
+      .cpu_info =
+          // NOLINTNEXTLINE(whitespace/braces)
+      {
+          .physical_cpus =
+              // NOLINTNEXTLINE(whitespace/braces)
+          {
+              {
+                  .model_name = model_name,
+              },
+          },
+      },
+      .bus_devices =
+          // NOLINTNEXTLINE(whitespace/braces)
+      {
+          {
+              .device_class =
+                  TelemetryInfo::BusDevice::BusDeviceClass::kWirelessController,
+              .bus_type_info =
+                  TelemetryInfo::BusDevice::PciBusInfo{
+                      .vendor_id = 0x0001,
+                      .device_id = 0x0002,
+                      .driver = "fake-driver-1",
+                  },
+          },
+          {
+              .device_class =
+                  TelemetryInfo::BusDevice::BusDeviceClass::kWirelessController,
+              .bus_type_info =
+                  TelemetryInfo::BusDevice::UsbBusInfo{
+                      .vendor_id = 0x0003,
+                      .product_id = 0x0004,
+                  },
+          },
+          {
+              .device_class =
+                  TelemetryInfo::BusDevice::BusDeviceClass::kDisplayController,
+              .bus_type_info =
+                  TelemetryInfo::BusDevice::PciBusInfo{
+                      .vendor_id = 0x0005,
+                      .device_id = 0x0006,
+                      .driver = "fake-driver-2",
+                  },
+          },
+          {
+              .device_class =
+                  TelemetryInfo::BusDevice::BusDeviceClass::kDisplayController,
+              .bus_type_info =
+                  TelemetryInfo::BusDevice::PciBusInfo{
+                      .vendor_id = 0xDEAD,
+                      .device_id = 0xBEEF,
+                      .driver = "fake-driver-3",
+                  },
+          },
+          {
+              .device_class =
+                  TelemetryInfo::BusDevice::BusDeviceClass::kDisplayController,
+              .bus_type_info =
+                  TelemetryInfo::BusDevice::UsbBusInfo{
+                      .vendor_id = 0x00AA,
+                      .product_id = 0x1111,
+                  },
+          },
+      },
+  });
+
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(1,
+            CountSubstringInString(
+                request_xml,
+                base::StringPrintf("    <hw"
+                                   " vendor_name=\"%s\""
+                                   " product_name=\"%s\""
+                                   " product_version=\"%s\""
+                                   " bios_version=\"%s\""
+                                   " uefi=\"%" PRId32 "\""
+                                   " system_memory_bytes=\"%" PRIu32 "\""
+                                   " root_disk_drive=\"%" PRIu64 "\""
+                                   " cpu_name=\"%s\""
+                                   " wireless_drivers=\"%s\""
+                                   " wireless_ids=\"%s\""
+                                   " gpu_drivers=\"%s\""
+                                   " gpu_ids=\"%s\""
+                                   " />\n",
+                                   sys_vendor.c_str(),
+                                   product_name.c_str(),
+                                   product_version.c_str(),
+                                   bios_version.c_str(),
+                                   static_cast<int32_t>(boot_mode),
+                                   total_memory_kib,
+                                   size,
+                                   model_name.c_str(),
+                                   "fake-driver-1",
+                                   "0001:0002 0003:0004",
+                                   "fake-driver-2 fake-driver-3",
+                                   "0005:0006 DEAD:BEEF 00AA:1111")))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest, GetRequestXmlHwCheckMissingCrosHealthd) {
+  params_.set_hw_details(true);
+
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(1,
+            CountSubstringInString(request_xml,
+                                   "    <hw"
+                                   " vendor_name=\"\""
+                                   " product_name=\"\""
+                                   " product_version=\"\""
+                                   " bios_version=\"\""
+                                   " uefi=\"0\""
+                                   " system_memory_bytes=\"0\""
+                                   " root_disk_drive=\"0\""
+                                   " cpu_name=\"\""
+                                   " wireless_drivers=\"\""
+                                   " wireless_ids=\"\""
+                                   " gpu_drivers=\"\""
+                                   " gpu_ids=\"\""
+                                   " />\n"))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest, TargetVersionPrefixIsSent) {
+  params_.set_target_version_prefix("12345.");
+
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(
+      1, CountSubstringInString(request_xml, "targetversionprefix=\"12345.\""))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest, NormalUpdateDoesNotSendRollback) {
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(0, CountSubstringInString(request_xml, "rollback_allowed="))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest,
+       RollbackAndTargetversionSendsRollbackAndTargetVersion) {
+  params_.set_target_version_prefix("12345.1.");
+  params_.set_rollback_allowed(true);
+
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(1, CountSubstringInString(request_xml, "rollback_allowed=\"true\""))
+      << request_xml;
+  EXPECT_EQ(
+      1,
+      CountSubstringInString(request_xml, "targetversionprefix=\"12345.1.\""))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest,
+       RollbackWithoutTargetversionDoesNotRollback) {
+  params_.set_rollback_allowed(true);
+
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(0, CountSubstringInString(request_xml, "rollback_allowed="))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest,
+       FsiVersionTakesPrecedenceOverActivateDateForEnterpriseRollback) {
+  params_.set_target_version_prefix("12345.1.");
+  params_.set_rollback_allowed(true);
+  params_.set_fsi_version("12345.6.7");
+  params_.set_activate_date("2023-05");
+
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(1, CountSubstringInString(request_xml, "fsi_version=\"12345.6.7\""))
+      << request_xml;
+  EXPECT_EQ(0, CountSubstringInString(request_xml, "activate_date="))
+      << request_xml;
+}
+
+TEST_F(OmahaRequestBuilderXmlTest,
+       ActivateDateIsSentOnEnterpriseRollbackIfNoFsiVersion) {
+  params_.set_target_version_prefix("12345.1.");
+  params_.set_rollback_allowed(true);
+  params_.set_activate_date("2023-05");
+
+  OmahaRequestBuilderXml omaha_request{nullptr, false, false, 0, 0, 0, ""};
+  const string request_xml = omaha_request.GetRequest();
+  EXPECT_EQ(0, CountSubstringInString(request_xml, "fsi_version="))
+      << request_xml;
+  EXPECT_EQ(1, CountSubstringInString(request_xml, "activate_date=\"2023-05\""))
       << request_xml;
 }
 

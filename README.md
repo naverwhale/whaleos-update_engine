@@ -1,3 +1,5 @@
+This repo for WhaleOS is based on https://chromium.googlesource.com/aosp/platform/system/update_engine/.
+
 # Chrome OS Update Process
 
 [TOC]

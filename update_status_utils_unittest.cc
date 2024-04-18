@@ -37,16 +37,20 @@ TEST(UpdateStatusUtilsTest, UpdateEngineStatusToStringTest) {
       .is_install = true,
       .will_powerwash_after_reboot = true,
       .last_attempt_error = 0,
+      .is_interactive = true,
+      .will_defer_update = true,
   };
   string print =
       R"(CURRENT_OP=UPDATE_STATUS_CHECKING_FOR_UPDATE
 IS_ENTERPRISE_ROLLBACK=true
 IS_INSTALL=true
+IS_INTERACTIVE=true
 LAST_ATTEMPT_ERROR=ErrorCode::kSuccess
 LAST_CHECKED_TIME=156000000
 NEW_SIZE=888
 NEW_VERSION=12345.0.0
 PROGRESS=0.5
+WILL_DEFER_UPDATE=true
 WILL_POWERWASH_AFTER_REBOOT=true
 )";
   EXPECT_EQ(print, UpdateEngineStatusToString(update_engine_status));

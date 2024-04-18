@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/test/simple_test_clock.h>
 #include <base/time/time.h>
 #include <brillo/message_loops/fake_message_loop.h>
@@ -38,10 +38,7 @@
 #include "update_engine/update_manager/fake_state.h"
 #include "update_engine/update_manager/umtest_utils.h"
 
-using base::Bind;
-using base::Callback;
 using base::Time;
-using base::TimeDelta;
 using brillo::MessageLoop;
 using brillo::MessageLoopRunMaxIterations;
 using chromeos_update_engine::ErrorCode;
@@ -70,8 +67,8 @@ class UmUpdateManagerTest : public ::testing::Test {
     loop_.SetAsCurrent();
     FakeSystemState::CreateInstance();
     fake_state_ = new FakeState();
-    umut_.reset(new UpdateManager(
-        TimeDelta::FromSeconds(5), TimeDelta::FromSeconds(1), fake_state_));
+    umut_.reset(
+        new UpdateManager(base::Seconds(5), base::Seconds(1), fake_state_));
   }
 
   void TearDown() override { EXPECT_FALSE(loop_.PendingTasks()); }
@@ -214,11 +211,11 @@ TEST_F(UmUpdateManagerTest, AsyncPolicyRequestDelaysEvaluation) {
   // succeeds the first time, we ensure that the passed callback is called from
   // the main loop in both cases even when we could evaluate it right now.
   vector<EvalStatus> calls;
-  Callback<void(EvalStatus)> callback = Bind(AccumulateCallsCallback, &calls);
+  auto callback = base::BindOnce(AccumulateCallsCallback, &calls);
 
   umut_->PolicyRequest(std::make_unique<FailingPolicy>(),
                        std::make_shared<PolicyDataInterface>(),
-                       callback);
+                       std::move(callback));
   // The callback should wait until we run the main loop for it to be executed.
   EXPECT_EQ(0U, calls.size());
   MessageLoopRunMaxIterations(MessageLoop::current(), 100);
@@ -229,12 +226,12 @@ TEST_F(UmUpdateManagerTest, AsyncPolicyRequestTimeoutDoesNotFire) {
   // Set up an async policy call to return immediately, then wait a little and
   // ensure that the timeout event does not fire.
   vector<EvalStatus> calls;
-  Callback<void(EvalStatus)> callback = Bind(AccumulateCallsCallback, &calls);
+  auto callback = base::BindOnce(AccumulateCallsCallback, &calls);
 
   int num_called = 0;
   umut_->PolicyRequest(std::make_unique<FailingPolicy>(&num_called),
                        std::make_shared<PolicyDataInterface>(),
-                       callback);
+                       std::move(callback));
   // Run the main loop, ensure that policy was attempted once before deferring
   // to the default.
   MessageLoopRunMaxIterations(MessageLoop::current(), 100);
@@ -243,7 +240,7 @@ TEST_F(UmUpdateManagerTest, AsyncPolicyRequestTimeoutDoesNotFire) {
   EXPECT_EQ(EvalStatus::kSucceeded, calls[0]);
   // Wait for the timeout to expire, run the main loop again, ensure that
   // nothing happened.
-  test_clock_.Advance(TimeDelta::FromSeconds(2));
+  test_clock_.Advance(base::Seconds(2));
   MessageLoopRunMaxIterations(MessageLoop::current(), 10);
   EXPECT_EQ(1, num_called);
   EXPECT_EQ(1U, calls.size());
@@ -255,15 +252,14 @@ TEST_F(UmUpdateManagerTest, AsyncPolicyRequestTimesOut) {
   // that the default policy was not used (no callback) and that evaluation is
   // reattempted.
   vector<EvalStatus> calls;
-  Callback<void(EvalStatus)> callback = Bind(AccumulateCallsCallback, &calls);
+  auto callback = base::BindOnce(AccumulateCallsCallback, &calls);
 
   int num_called = 0;
   auto policy = std::make_unique<DelayPolicy>(
-      0,
-      fake_clock->GetWallclockTime() + TimeDelta::FromSeconds(3),
-      &num_called);
-  umut_->PolicyRequest(
-      std::move(policy), std::make_shared<PolicyDataInterface>(), callback);
+      0, fake_clock->GetWallclockTime() + base::Seconds(3), &num_called);
+  umut_->PolicyRequest(std::move(policy),
+                       std::make_shared<PolicyDataInterface>(),
+                       std::move(callback));
   // Run the main loop, ensure that policy was attempted once but the callback
   // was not invoked.
   MessageLoopRunMaxIterations(MessageLoop::current(), 100);
@@ -272,17 +268,17 @@ TEST_F(UmUpdateManagerTest, AsyncPolicyRequestTimesOut) {
   // Wait for the expiration timeout to expire, run the main loop again,
   // ensure that reevaluation occurred but callback was not invoked (i.e.
   // default policy was not consulted).
-  test_clock_.Advance(TimeDelta::FromSeconds(2));
+  test_clock_.Advance(base::Seconds(2));
   fake_clock->SetWallclockTime(fake_clock->GetWallclockTime() +
-                               TimeDelta::FromSeconds(2));
+                               base::Seconds(2));
   MessageLoopRunMaxIterations(MessageLoop::current(), 10);
   EXPECT_EQ(2, num_called);
   EXPECT_EQ(0U, calls.size());
   // Wait for reevaluation due to delay to happen, ensure that it occurs and
   // that the callback is invoked.
-  test_clock_.Advance(TimeDelta::FromSeconds(2));
+  test_clock_.Advance(base::Seconds(2));
   fake_clock->SetWallclockTime(fake_clock->GetWallclockTime() +
-                               TimeDelta::FromSeconds(2));
+                               base::Seconds(2));
   MessageLoopRunMaxIterations(MessageLoop::current(), 10);
   EXPECT_EQ(3, num_called);
   ASSERT_EQ(1U, calls.size());
@@ -292,7 +288,7 @@ TEST_F(UmUpdateManagerTest, AsyncPolicyRequestTimesOut) {
 TEST_F(UmUpdateManagerTest, AsyncPolicyRequestIsAddedToList) {
   umut_->PolicyRequest(std::make_unique<SimplePolicy>(),
                        std::make_shared<PolicyDataInterface>(),
-                       base::Bind([](EvalStatus) {}));
+                       base::BindOnce([](EvalStatus) {}));
   EXPECT_EQ(1, umut_->evaluators_.size());
 
   MessageLoopRunMaxIterations(MessageLoop::current(), 10);

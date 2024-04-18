@@ -25,8 +25,8 @@
 #include <curl/curl.h>
 
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <brillo/message_loops/message_loop.h>
 
 #include "update_engine/certificate_checker.h"
@@ -126,10 +126,14 @@ class LibcurlHttpFetcher : public HttpFetcher {
   //     currently has no stored timeout value. You must not wait too long
   //     (more than a few seconds perhaps) before you call
   //     curl_multi_perform() again.
-  void set_idle_seconds(int seconds) override { idle_seconds_ = seconds; }
+  void set_idle_seconds(int seconds) override {
+    idle_time_ = base::Seconds(seconds);
+  }
 
   // Sets the retry timeout. Useful for testing.
-  void set_retry_seconds(int seconds) override { retry_seconds_ = seconds; }
+  void set_retry_seconds(int seconds) override {
+    retry_time_ = base::Seconds(seconds);
+  }
 
   void set_no_network_max_retries(int retries) {
     no_network_max_retries_ = retries;
@@ -164,6 +168,8 @@ class LibcurlHttpFetcher : public HttpFetcher {
 
  private:
   FRIEND_TEST(LibcurlHttpFetcherTest, HostResolvedTest);
+  FRIEND_TEST(LibcurlHttpFetcherTest, PartialContentHttpResponseRetryTest);
+  FRIEND_TEST(LibcurlHttpFetcherTest, SuccessHttpResponseCappedRetryTest);
 
   // libcurl's CURLOPT_CLOSESOCKETFUNCTION callback function. Called when
   // closing a socket created with the CURLOPT_OPENSOCKETFUNCTION callback.
@@ -182,6 +188,11 @@ class LibcurlHttpFetcher : public HttpFetcher {
   // Checks whether stored HTTP response is within the success range.
   inline bool IsHttpResponseSuccess() {
     return (http_response_code_ >= 200 && http_response_code_ < 300);
+  }
+
+  // Checks whether stored HTTP response is partial data.
+  inline bool IsHttpResponseSuccessPartialContent() {
+    return http_response_code_ == 206;
   }
 
   // Checks whether stored HTTP response is within the error range. This
@@ -223,7 +234,7 @@ class LibcurlHttpFetcher : public HttpFetcher {
 
   // Cleans up the following if they are non-null:
   // curl(m) handles, fd_controller_maps_(fd_task_maps_), timeout_id_.
-  void CleanUp();
+  virtual void CleanUp();
 
   // Force terminate the transfer. This will invoke the delegate's (if any)
   // TransferTerminated callback so, after returning, this fetcher instance may
@@ -259,8 +270,11 @@ class LibcurlHttpFetcher : public HttpFetcher {
   // the message loop. libcurl may open/close descriptors and switch their
   // directions so maintain two separate lists so that watch conditions can be
   // set appropriately.
-  std::map<int, std::unique_ptr<base::FileDescriptorWatcher::Controller>>
-      fd_controller_maps_[2];
+  struct WatchedFd {
+    base::ScopedFD fd;
+    std::unique_ptr<base::FileDescriptorWatcher::Controller> controller;
+  };
+  std::map<int, WatchedFd> fd_controller_maps_[2];
 
   // The TaskId of the timer we're waiting on. kTaskIdNull if we are not waiting
   // on it.
@@ -299,7 +313,7 @@ class LibcurlHttpFetcher : public HttpFetcher {
   int max_retry_count_{kDownloadMaxRetryCount};
 
   // Seconds to wait before retrying a resume.
-  int retry_seconds_{20};
+  base::TimeDelta retry_time_{base::Seconds(20)};
 
   // When waiting for a retry, the task id of the retry callback.
   brillo::MessageLoop::TaskId retry_task_id_{brillo::MessageLoop::kTaskIdNull};
@@ -309,7 +323,7 @@ class LibcurlHttpFetcher : public HttpFetcher {
   int no_network_max_retries_{0};
 
   // Seconds to wait before asking libcurl to "perform".
-  int idle_seconds_{1};
+  base::TimeDelta idle_time_{base::Seconds(1)};
 
   // If true, we are currently performing a write callback on the delegate.
   bool in_write_callback_{false};

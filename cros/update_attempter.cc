@@ -26,9 +26,8 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/compiler_specific.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/rand_util.h>
 #include <base/strings/string_number_conversions.h>
@@ -38,6 +37,7 @@
 #include <brillo/data_encoding.h>
 #include <brillo/errors/error_codes.h>
 #include <brillo/message_loops/message_loop.h>
+#include <chromeos/constants/imageloader.h>
 #include <policy/device_policy.h>
 #include <policy/libpolicy.h>
 #include <update_engine/dbus-constants.h>
@@ -56,6 +56,8 @@
 #include "update_engine/common/system_state.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/cros/download_action_chromeos.h"
+#include "update_engine/cros/install_action.h"
+#include "update_engine/cros/metrics_reporter_omaha.h"
 #include "update_engine/cros/omaha_request_action.h"
 #include "update_engine/cros/omaha_request_params.h"
 #include "update_engine/cros/omaha_response_handler_action.h"
@@ -67,18 +69,18 @@
 #include "update_engine/payload_consumer/filesystem_verifier_action.h"
 #include "update_engine/payload_consumer/postinstall_runner_action.h"
 #include "update_engine/update_boot_flags_action.h"
+#include "update_engine/update_manager/enterprise_update_disabled_policy_impl.h"
 #include "update_engine/update_manager/omaha_request_params_policy.h"
 #include "update_engine/update_manager/update_manager.h"
 #include "update_engine/update_status_utils.h"
 
-using base::Bind;
-using base::Callback;
 using base::FilePath;
 using base::Time;
 using base::TimeDelta;
 using base::TimeTicks;
 using brillo::MessageLoop;
 using chromeos_update_manager::CalculateStagingCase;
+using chromeos_update_manager::EnterpriseUpdateDisabledPolicyImpl;
 using chromeos_update_manager::EvalStatus;
 using chromeos_update_manager::OmahaRequestParamsPolicy;
 using chromeos_update_manager::StagingCase;
@@ -88,6 +90,7 @@ using chromeos_update_manager::UpdateCheckParams;
 using std::map;
 using std::string;
 using std::vector;
+using update_engine::FeatureInternalList;
 using update_engine::UpdateAttemptFlags;
 using update_engine::UpdateEngineStatus;
 
@@ -100,13 +103,25 @@ const int kMaxConsecutiveObeyProxyRequests = 20;
 
 // Minimum threshold to broadcast an status update in progress and time.
 const double kBroadcastThresholdProgress = 0.01;  // 1%
-const int kBroadcastThresholdSeconds = 10;
+constexpr TimeDelta kBroadcastThreshold = base::Seconds(10);
 
 // By default autest bypasses scattering. If we want to test scattering,
 // use kScheduledAUTestURLRequest. The URL used is same in both cases, but
 // different params are passed to CheckForUpdate().
 const char kAUTestURLRequest[] = "autest";
 const char kScheduledAUTestURLRequest[] = "autest-scheduled";
+
+string ConvertToString(ProcessMode op) {
+  switch (op) {
+    case ProcessMode::UPDATE:
+      return "update";
+    case ProcessMode::INSTALL:
+      return "install";
+    case ProcessMode::SCALED_INSTALL:
+      return "scaled install";
+  }
+}
+
 }  // namespace
 
 ErrorCode GetErrorCodeForAction(AbstractAction* action, ErrorCode code) {
@@ -129,7 +144,6 @@ ErrorCode GetErrorCodeForAction(AbstractAction* action, ErrorCode code) {
 UpdateAttempter::UpdateAttempter(CertificateChecker* cert_checker)
     : processor_(new ActionProcessor()),
       cert_checker_(cert_checker),
-      is_install_(false),
       weak_ptr_factory_(this) {}
 
 UpdateAttempter::~UpdateAttempter() {
@@ -151,6 +165,7 @@ void UpdateAttempter::Init() {
   // which requires them all to be constructed prior to it being used.
   prefs_ = SystemState::Get()->prefs();
   omaha_request_params_ = SystemState::Get()->request_params();
+  excluder_ = CreateExcluder();
 
   if (cert_checker_)
     cert_checker_->SetObserver(this);
@@ -158,7 +173,16 @@ void UpdateAttempter::Init() {
   // In case of update_engine restart without a reboot we need to restore the
   // reboot needed state.
   if (GetBootTimeAtUpdate(nullptr)) {
-    status_ = UpdateStatus::UPDATED_NEED_REBOOT;
+    if (prefs_->Exists(kPrefsDeferredUpdateCompleted))
+      status_ = UpdateStatus::UPDATED_BUT_DEFERRED;
+    else
+      status_ = UpdateStatus::UPDATED_NEED_REBOOT;
+
+    // Check if the pending update should be invalidated due to the enterprise
+    // invalidation after update_engine restart.
+    if (status_ == UpdateStatus::UPDATED_NEED_REBOOT) {
+      ScheduleEnterpriseUpdateInvalidationCheck();
+    }
   } else {
     // Send metric before deleting prefs. Metric tells us how many times the
     // inactive partition was updated before the reboot.
@@ -171,21 +195,71 @@ void UpdateAttempter::Init() {
 }
 
 bool UpdateAttempter::IsUpdating() {
-  return !is_install_;
+  return pm_ == ProcessMode::UPDATE;
 }
 
-bool UpdateAttempter::ScheduleUpdates() {
-  if (IsBusyOrUpdateScheduled())
+bool UpdateAttempter::ScheduleEnterpriseUpdateInvalidationCheck() {
+  if (enterprise_update_invalidation_check_scheduled_) {
+    LOG(WARNING)
+        << "Enterprise update invalidation check is already scheduled.";
     return false;
+  }
+  enterprise_update_invalidation_check_scheduled_ = true;
+
+  LOG(INFO) << "Scheduling enterprise update invalidation check.";
+  SystemState::Get()->update_manager()->PolicyRequest(
+      std::make_unique<EnterpriseUpdateDisabledPolicyImpl>(),
+      nullptr,
+      base::BindOnce(&UpdateAttempter::OnEnterpriseUpdateInvalidationCheck,
+                     weak_ptr_factory_.GetWeakPtr()));
+
+  return true;
+}
+
+void UpdateAttempter::OnEnterpriseUpdateInvalidationCheck(
+    EvalStatus eval_status) {
+  enterprise_update_invalidation_check_scheduled_ = false;
+
+  if (eval_status == EvalStatus::kSucceeded &&
+      status_ == UpdateStatus::UPDATED_NEED_REBOOT) {
+    LOG(INFO) << "Received enterprise update invalidation signal. "
+              << "Invalidating the pending update.";
+    bool invalidation_result = InvalidateUpdate();
+    SystemState::Get()
+        ->metrics_reporter()
+        ->ReportEnterpriseUpdateInvalidatedResult(invalidation_result);
+    ResetUpdateStatus();
+  }
+
+  return;
+}
+
+bool UpdateAttempter::ScheduleUpdates(const ScheduleUpdatesParams& params) {
+  // Overrides based off of `ScheduleUpdateParams`.
+  auto UpdateCheckAllowedPolicyDataOverrider = [this, params]() {
+    LOG(INFO) << "Overriding scheduled update check allowed policy data.";
+    policy_data_->update_check_params.force_fw_update = params.force_fw_update;
+  };
+
+  if (IsBusyOrUpdateScheduled()) {
+    // Ignoring other special cases of auto scenarios, allow override only while
+    // policy hasn't been evaluated.
+    if (status_ == UpdateStatus::IDLE) {
+      UpdateCheckAllowedPolicyDataOverrider();
+    }
+    return false;
+  }
 
   // We limit the async policy request to a reasonably short time, to avoid a
   // starvation due to a transient bug.
   policy_data_.reset(new UpdateCheckAllowedPolicyData());
+  UpdateCheckAllowedPolicyDataOverrider();
+
   SystemState::Get()->update_manager()->PolicyRequest(
       std::make_unique<UpdateCheckAllowedPolicy>(),
       policy_data_,  // Do not move because we don't want transfer of ownership.
-      base::Bind(&UpdateAttempter::OnUpdateScheduled,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindOnce(&UpdateAttempter::OnUpdateScheduled,
+                     weak_ptr_factory_.GetWeakPtr()));
 
   waiting_for_scheduled_check_ = true;
   return true;
@@ -195,26 +269,31 @@ bool UpdateAttempter::StartUpdater() {
   // Initiate update checks.
   ScheduleUpdates();
 
+  // Start the rootfs integrity check.
+  RootfsIntegrityCheck();
+
+  // Keep this after kicking off rootfs integrity check.
   auto update_boot_flags_action = std::make_unique<UpdateBootFlagsAction>(
       SystemState::Get()->boot_control(), SystemState::Get()->hardware());
   aux_processor_.EnqueueAction(std::move(update_boot_flags_action));
-  // Update boot flags after 45 seconds.
+  // Update boot flags after delay.
   MessageLoop::current()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&ActionProcessor::StartProcessing,
-                 base::Unretained(&aux_processor_)),
-      base::TimeDelta::FromSeconds(45));
+      base::BindOnce(&ActionProcessor::StartProcessing,
+                     base::Unretained(&aux_processor_)),
+      base::Seconds(60));
 
   // Broadcast the update engine status on startup to ensure consistent system
   // state on crashes.
-  MessageLoop::current()->PostTask(FROM_HERE,
-                                   base::Bind(&UpdateAttempter::BroadcastStatus,
-                                              weak_ptr_factory_.GetWeakPtr()));
+  MessageLoop::current()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&UpdateAttempter::BroadcastStatus,
+                     weak_ptr_factory_.GetWeakPtr()));
 
   MessageLoop::current()->PostTask(
       FROM_HERE,
-      base::Bind(&UpdateAttempter::UpdateEngineStarted,
-                 weak_ptr_factory_.GetWeakPtr()));
+      base::BindOnce(&UpdateAttempter::UpdateEngineStarted,
+                     weak_ptr_factory_.GetWeakPtr()));
   return true;
 }
 
@@ -316,6 +395,21 @@ void UpdateAttempter::Update(const UpdateCheckParams& params) {
     }
     LOG(INFO) << "Already updated but checking to see if there are more recent "
                  "updates available.";
+  } else if (status_ == UpdateStatus::UPDATED_BUT_DEFERRED) {
+    // Update is already deferred, don't proceed with repeated updates.
+    // Although we have applied an update, we still want to ping Omaha
+    // to ensure the number of active statistics is accurate.
+    //
+    // Also convey to the UpdateEngine.Check.Result metric that we're
+    // not performing an update check because of this.
+    LOG(INFO) << "Not updating b/c we deferred update, ping Omaha instead";
+    // TODO(kimjae): Add label for metric.
+    SystemState::Get()->metrics_reporter()->ReportUpdateCheckMetrics(
+        metrics::CheckResult::kDeferredUpdate,
+        metrics::CheckReaction::kUnset,
+        metrics::DownloadErrorCode::kUnset);
+    PingOmaha();
+    return;
   } else if (status_ != UpdateStatus::IDLE) {
     // Update in progress. Do nothing.
     return;
@@ -325,7 +419,7 @@ void UpdateAttempter::Update(const UpdateCheckParams& params) {
     return;
   }
 
-  BuildUpdateActions(params.interactive);
+  BuildUpdateActions(params);
 
   SetStatusAndNotify(UpdateStatus::CHECKING_FOR_UPDATE);
 
@@ -333,6 +427,30 @@ void UpdateAttempter::Update(const UpdateCheckParams& params) {
   // response is received, but this will prevent us from repeatedly scheduling
   // checks in the case where a response is not received.
   UpdateLastCheckedTime();
+
+  ScheduleProcessingStart();
+}
+
+void UpdateAttempter::Install() {
+  CHECK(!processor_->IsRunning());
+  processor_->set_delegate(this);
+
+  if (dlc_ids_.size() != 1) {
+    LOG(ERROR) << "Could not kick off installation.";
+    return;
+  }
+  const auto& dlc_id = dlc_ids_[0];
+
+  auto http_fetcher = std::make_unique<LibcurlHttpFetcher>(
+      GetProxyResolver(), SystemState::Get()->hardware());
+  auto install_action = std::make_unique<InstallAction>(
+      std::move(http_fetcher), dlc_id, /*slotting=*/"");
+  install_action->set_delegate(this);
+  SetOutPipe(install_action.get());
+  processor_->EnqueueAction(std::move(install_action));
+
+  // Simply go into CHECKING status.
+  SetStatusAndNotify(UpdateStatus::CHECKING_FOR_UPDATE);
 
   ScheduleProcessingStart();
 }
@@ -487,7 +605,7 @@ void UpdateAttempter::CalculateScatteringParams(bool interactive) {
     device_policy->GetScatterFactorInSeconds(&new_scatter_factor_in_secs);
     if (new_scatter_factor_in_secs < 0)  // sanitize input, just in case.
       new_scatter_factor_in_secs = 0;
-    scatter_factor_ = TimeDelta::FromSeconds(new_scatter_factor_in_secs);
+    scatter_factor_ = base::Seconds(new_scatter_factor_in_secs);
   }
 
   bool is_scatter_enabled = false;
@@ -527,7 +645,7 @@ void UpdateAttempter::CalculateScatteringParams(bool interactive) {
         // generating a new random value to improve the chances of a good
         // distribution for scattering.
         omaha_request_params_->set_waiting_period(
-            TimeDelta::FromSeconds(wait_period_in_secs));
+            base::Seconds(wait_period_in_secs));
         LOG(INFO) << "Using persisted wall-clock waiting period: "
                   << utils::FormatSecs(
                          omaha_request_params_->waiting_period().InSeconds());
@@ -576,7 +694,7 @@ void UpdateAttempter::CalculateScatteringParams(bool interactive) {
     // related code.
     omaha_request_params_->set_wall_clock_based_wait_enabled(false);
     omaha_request_params_->set_update_check_count_wait_enabled(false);
-    omaha_request_params_->set_waiting_period(TimeDelta::FromSeconds(0));
+    omaha_request_params_->set_waiting_period(base::Seconds(0));
     prefs_->Delete(kPrefsWallClockScatteringWaitPeriod);
     prefs_->Delete(kPrefsUpdateCheckCount);
     // Don't delete the UpdateFirstSeenAt file as we don't want manual checks
@@ -588,7 +706,7 @@ void UpdateAttempter::CalculateScatteringParams(bool interactive) {
 
 void UpdateAttempter::GenerateNewWaitingPeriod() {
   omaha_request_params_->set_waiting_period(
-      TimeDelta::FromSeconds(base::RandInt(1, scatter_factor_.InSeconds())));
+      base::Seconds(base::RandInt(1, scatter_factor_.InSeconds())));
 
   LOG(INFO) << "Generated new wall-clock waiting period: "
             << utils::FormatSecs(
@@ -625,10 +743,10 @@ void UpdateAttempter::CalculateStagingParams(bool interactive) {
     case StagingCase::kNoSavedValue:
       prefs_->SetInt64(kPrefsWallClockStagingWaitPeriod,
                        staging_wait_time_.InDays());
-      FALLTHROUGH;
+      [[fallthrough]];
     case StagingCase::kSetStagingFromPref:
       omaha_request_params_->set_waiting_period(staging_wait_time_);
-      FALLTHROUGH;
+      [[fallthrough]];
     case StagingCase::kNoAction:
       // Staging is on, enable wallclock based wait so that its values get used.
       omaha_request_params_->set_wall_clock_based_wait_enabled(true);
@@ -710,18 +828,25 @@ int64_t UpdateAttempter::GetPingMetadata(const string& metadata_key) const {
 void UpdateAttempter::CalculateDlcParams() {
   // Set the |dlc_ids_| only for an update. This is required to get the
   // currently installed DLC(s).
-  if (!is_install_ &&
+  if (IsUpdating() &&
       !SystemState::Get()->dlcservice()->GetDlcsToUpdate(&dlc_ids_)) {
     LOG(INFO) << "Failed to retrieve DLC module IDs from dlcservice. Check the "
                  "state of dlcservice, will not update DLC modules.";
   }
   map<string, OmahaRequestParams::AppParams> dlc_apps_params;
   for (const auto& dlc_id : dlc_ids_) {
+    const auto& manifest = SystemState::Get()->dlc_utils()->GetDlcManifest(
+        dlc_id, base::FilePath(imageloader::kDlcManifestRootpath));
+    if (!manifest) {
+      LOG(ERROR) << "Unable to load the manifest for DLC '" << dlc_id
+                 << "', treat it as a non-critical DLC.";
+    }
     OmahaRequestParams::AppParams dlc_params{
         .active_counting_type = OmahaRequestParams::kDateBased,
+        .critical_update = manifest && manifest->critical_update(),
         .name = dlc_id,
         .send_ping = false};
-    if (is_install_) {
+    if (!IsUpdating()) {
       // In some cases, |SetDlcActiveValue| might fail to reset the DLC prefs
       // when a DLC is uninstalled. To avoid having stale values from that
       // scenario, we reset the metadata values on a new install request.
@@ -757,16 +882,18 @@ void UpdateAttempter::CalculateDlcParams() {
     dlc_apps_params[omaha_request_params_->GetDlcAppId(dlc_id)] = dlc_params;
   }
   omaha_request_params_->set_dlc_apps_params(dlc_apps_params);
-  omaha_request_params_->set_is_install(is_install_);
+  omaha_request_params_->set_is_install(!IsUpdating());
 }
 
-void UpdateAttempter::BuildUpdateActions(bool interactive) {
+void UpdateAttempter::BuildUpdateActions(const UpdateCheckParams& params) {
   CHECK(!processor_->IsRunning());
   processor_->set_delegate(this);
 
+  bool interactive = params.interactive;
+
   // The session ID needs to be kept throughout the update flow. The value
   // of the session ID will reset/update only when it is a new update flow.
-  session_id_ = base::GenerateGUID();
+  session_id_ = base::Uuid::GenerateRandomV4().AsLowercaseString();
 
   // Actions:
   auto update_check_fetcher = std::make_unique<LibcurlHttpFetcher>(
@@ -823,7 +950,9 @@ void UpdateAttempter::BuildUpdateActions(bool interactive) {
       session_id_);
 
   auto postinstall_runner_action = std::make_unique<PostinstallRunnerAction>(
-      SystemState::Get()->boot_control(), SystemState::Get()->hardware());
+      SystemState::Get()->boot_control(),
+      SystemState::Get()->hardware(),
+      params.force_fw_update);
   postinstall_runner_action->set_delegate(this);
 
   // Bond them together. We have to use the leaf-types when calling
@@ -846,7 +975,7 @@ void UpdateAttempter::BuildUpdateActions(bool interactive) {
 }
 
 bool UpdateAttempter::Rollback(bool powerwash) {
-  is_install_ = false;
+  pm_ = ProcessMode::UPDATE;
   if (!CanRollback()) {
     return false;
   }
@@ -945,14 +1074,13 @@ bool UpdateAttempter::CheckForUpdate(
   if (status_ != UpdateStatus::IDLE &&
       status_ != UpdateStatus::UPDATED_NEED_REBOOT) {
     LOG(INFO) << "Refusing to do an update as there is an "
-              << (is_install_ ? "install" : "update")
-              << " already in progress.";
+              << ConvertToString(pm_) << " already in progress.";
     return false;
   }
 
   const auto& update_flags = update_params.update_flags();
   bool interactive = !update_flags.non_interactive();
-  is_install_ = false;
+  pm_ = ProcessMode::UPDATE;
   if (update_params.skip_applying()) {
     skip_applying_ = true;
     LOG(INFO) << "Update check is only going to query server for update, will "
@@ -999,23 +1127,85 @@ bool UpdateAttempter::CheckForUpdate(
     // we need an update to be scheduled for the
     // |forced_update_pending_callback_| to have an effect. Here we don't need
     // to care about the return value from |ScheduleUpdate()|.
-    ScheduleUpdates();
+    ScheduleUpdates({
+        .force_fw_update = update_params.force_fw_update(),
+    });
     forced_update_pending_callback_->Run(true, interactive);
   }
   return true;
 }
 
+bool UpdateAttempter::ApplyDeferredUpdate(bool shutdown) {
+  if (status_ != UpdateStatus::UPDATED_BUT_DEFERRED) {
+    LOG(ERROR) << "Cannot apply deferred update when there isn't one "
+                  "deferred.";
+    return false;
+  }
+
+  LOG(INFO) << "Applying deferred update.";
+  install_plan_.reset(new InstallPlan());
+  auto* boot_control = SystemState::Get()->boot_control();
+
+  install_plan_->run_post_install = true;
+
+  if (shutdown) {
+    install_plan_->defer_update_action = DeferUpdateAction::kApplyAndShutdown;
+  } else {
+    install_plan_->defer_update_action = DeferUpdateAction::kApplyAndReboot;
+  }
+
+  // Since CrOS is A/B, it's okay to get the first inactive slot.
+  install_plan_->source_slot = boot_control->GetCurrentSlot();
+  install_plan_->target_slot = boot_control->GetFirstInactiveSlot();
+
+  install_plan_->partitions.push_back({
+      .name = "root",
+      .source_size = 1,
+      .target_size = 1,
+      .run_postinstall = true,
+      // TODO(kimjae): Store + override to handle non default script usage.
+      .postinstall_path = kPostinstallDefaultScript,
+  });
+  if (!install_plan_->LoadPartitionsFromSlots(boot_control)) {
+    LOG(ERROR) << "Failed to setup partitions for applying deferred update.";
+    return false;
+  }
+
+  install_plan_->Dump();
+
+  auto install_plan_action =
+      std::make_unique<InstallPlanAction>(*install_plan_);
+  auto postinstall_runner_action = std::make_unique<PostinstallRunnerAction>(
+      boot_control, SystemState::Get()->hardware());
+  postinstall_runner_action->set_delegate(this);
+  BondActions(install_plan_action.get(), postinstall_runner_action.get());
+  processor_->EnqueueAction(std::move(install_plan_action));
+  processor_->EnqueueAction(std::move(postinstall_runner_action));
+  processor_->set_delegate(this);
+
+  ScheduleProcessingStart();
+  return true;
+}
+
 bool UpdateAttempter::CheckForInstall(const vector<string>& dlc_ids,
-                                      const string& omaha_url) {
+                                      const string& omaha_url,
+                                      bool scaled) {
   if (status_ != UpdateStatus::IDLE) {
     LOG(INFO) << "Refusing to do an install as there is an "
-              << (is_install_ ? "install" : "update")
-              << " already in progress.";
+              << ConvertToString(pm_) << " already in progress.";
     return false;
   }
 
   dlc_ids_ = dlc_ids;
-  is_install_ = true;
+  pm_ = ProcessMode::INSTALL;
+  if (scaled) {
+    pm_ = ProcessMode::SCALED_INSTALL;
+    if (dlc_ids_.size() != 1) {
+      LOG(ERROR) << "Can't install more than one scaled DLC at a time.";
+      return false;
+    }
+  }
+
   forced_omaha_url_.clear();
 
   // Certain conditions must be met to allow setting custom version and update
@@ -1051,6 +1241,13 @@ bool UpdateAttempter::RebootIfNeeded() {
   return RebootDirectly();
 }
 
+bool UpdateAttempter::ShutdownIfNeeded() {
+  if (SystemState::Get()->power_manager()->RequestShutdown())
+    return true;
+
+  return ShutdownDirectly();
+}
+
 void UpdateAttempter::WriteUpdateCompletedMarker() {
   string boot_id;
   if (!utils::GetBootId(&boot_id))
@@ -1063,6 +1260,13 @@ void UpdateAttempter::WriteUpdateCompletedMarker() {
 
 bool UpdateAttempter::RebootDirectly() {
   vector<string> command = {"/sbin/shutdown", "-r", "now"};
+  int rc = 0;
+  Subprocess::SynchronousExec(command, &rc, nullptr, nullptr);
+  return rc == 0;
+}
+
+bool UpdateAttempter::ShutdownDirectly() {
+  vector<string> command = {"/sbin/shutdown", "-P", "now"};
   int rc = 0;
   Subprocess::SynchronousExec(command, &rc, nullptr, nullptr);
   return rc == 0;
@@ -1086,7 +1290,7 @@ void UpdateAttempter::OnUpdateScheduled(EvalStatus status) {
     }
 
     LOG(INFO) << "Running " << (params.interactive ? "interactive" : "periodic")
-              << " update.";
+              << " " << ConvertToString(pm_);
 
     if (!params.interactive) {
       // Cache the update attempt flags that will be used by this update attempt
@@ -1094,7 +1298,15 @@ void UpdateAttempter::OnUpdateScheduled(EvalStatus status) {
       current_update_flags_ = update_flags_;
     }
 
-    Update(params);
+    switch (pm_) {
+      case ProcessMode::UPDATE:
+      case ProcessMode::INSTALL:
+        Update(params);
+        break;
+      case ProcessMode::SCALED_INSTALL:
+        Install();
+        break;
+    }
     // Always clear the forced app_version and omaha_url after an update attempt
     // so the next update uses the defaults.
     forced_app_version_.clear();
@@ -1193,10 +1405,14 @@ void UpdateAttempter::ProcessingDoneInternal(const ActionProcessor* processor,
   prefs_->Delete(kPrefsUpdateFirstSeenAt);
 
   // Note: below this comment should only be on |ErrorCode::kSuccess|.
-  if (is_install_) {
-    ProcessingDoneInstall(processor, code);
-  } else {
-    ProcessingDoneUpdate(processor, code);
+  switch (pm_) {
+    case ProcessMode::UPDATE:
+      ProcessingDoneUpdate(processor, code);
+      break;
+    case ProcessMode::INSTALL:
+    case ProcessMode::SCALED_INSTALL:
+      ProcessingDoneInstall(processor, code);
+      break;
   }
 }
 
@@ -1224,19 +1440,55 @@ void UpdateAttempter::ProcessingDoneUpdate(const ActionProcessor* processor,
 
   if (!SystemState::Get()->dlcservice()->UpdateCompleted(GetSuccessfulDlcIds()))
     LOG(WARNING) << "dlcservice didn't successfully handle update completion.";
-  SetStatusAndNotify(UpdateStatus::UPDATED_NEED_REBOOT);
-  ScheduleUpdates();
-  LOG(INFO) << "Update successfully applied, waiting to reboot.";
+
+  if (install_plan_) {
+    switch (install_plan_->defer_update_action) {
+      case DeferUpdateAction::kOff:
+        SetStatusAndNotify(UpdateStatus::UPDATED_NEED_REBOOT);
+        ScheduleUpdates();
+        LOG(INFO) << "Update successfully applied, waiting to reboot.";
+        break;
+      case DeferUpdateAction::kHold:
+        prefs_->SetString(kPrefsDeferredUpdateCompleted, "");
+        SetStatusAndNotify(UpdateStatus::UPDATED_BUT_DEFERRED);
+        ScheduleUpdates();
+        LOG(INFO) << "Deferred update hold action was successful.";
+        return;
+      case DeferUpdateAction::kApplyAndReboot:
+        SetStatusAndNotify(UpdateStatus::UPDATED_BUT_DEFERRED);
+        LOG(INFO) << "Deferred update apply action was successful, "
+                     "proceeding with reboot.";
+        if (!ResetStatus()) {
+          LOG(WARNING) << "Failed to reset status.";
+        }
+        RebootIfNeeded();
+        return;
+      case DeferUpdateAction::kApplyAndShutdown:
+        SetStatusAndNotify(UpdateStatus::UPDATED_BUT_DEFERRED);
+        LOG(INFO) << "Deferred update apply action was successful, "
+                     "proceeding with shutdown.";
+        if (!ResetStatus()) {
+          LOG(WARNING) << "Failed to reset status.";
+        }
+        ShutdownIfNeeded();
+        return;
+    }
+  } else {
+    SetStatusAndNotify(UpdateStatus::UPDATED_NEED_REBOOT);
+    ScheduleUpdates();
+    LOG(INFO) << "Update successfully applied, waiting to reboot.";
+  }
 
   // |install_plan_| is null during rollback operations, and the stats don't
   // make much sense then anyway.
   if (install_plan_) {
-      int64_t num_consecutive_updates = 0;
-      SystemState::Get()->prefs()->GetInt64(kPrefsConsecutiveUpdateCount,
-                                            &num_consecutive_updates);
-      // Increment pref after every update.
-      SystemState::Get()->prefs()->SetInt64(kPrefsConsecutiveUpdateCount,
-                                            ++num_consecutive_updates);
+    int64_t num_consecutive_updates = 0;
+    SystemState::Get()->prefs()->GetInt64(kPrefsConsecutiveUpdateCount,
+                                          &num_consecutive_updates);
+    // Increment pref after every update.
+    SystemState::Get()->prefs()->SetInt64(kPrefsConsecutiveUpdateCount,
+                                          ++num_consecutive_updates);
+    // TODO(kimjae): Seperate out apps into categories (OS, DLC, etc).
     // Generate an unique payload identifier.
     string target_version_uid;
     for (const auto& payload : install_plan_->payloads) {
@@ -1251,7 +1503,7 @@ void UpdateAttempter::ProcessingDoneUpdate(const ActionProcessor* processor,
     if (install_plan_->is_rollback) {
       SystemState::Get()->payload_state()->SetRollbackHappened(true);
       SystemState::Get()->metrics_reporter()->ReportEnterpriseRollbackMetrics(
-          /*success=*/true, install_plan_->version);
+          metrics::kMetricEnterpriseRollbackSuccess, install_plan_->version);
     }
 
     // Expect to reboot into the new version to send the proper metric during
@@ -1275,8 +1527,16 @@ void UpdateAttempter::ProcessingDone(const ActionProcessor* processor,
 
   // Note: do cleanups here for any variables that need to be reset after a
   // failure, error, update, or install.
-  is_install_ = false;
+  pm_ = ProcessMode::UPDATE;
   skip_applying_ = false;
+  // Scheduling a check for and subscribing to the enterprise update
+  // invalidation signals at the very end of update cycles.
+  // That allows to invalidate updates in case if the update engine receives
+  // an enterprise invalidation signal after an update cycle completes.
+  // Scheduling the check here also covers the case when the signal gets
+  // received during an in-progress update.
+  // More details can be found in the feature tracker b/275530794.
+  ScheduleEnterpriseUpdateInvalidationCheck();
 }
 
 void UpdateAttempter::ProcessingStopped(const ActionProcessor* processor) {
@@ -1328,9 +1588,10 @@ void UpdateAttempter::ActionCompleted(ActionProcessor* processor,
           std::max(0, omaha_response.poll_interval);
 
       // This update is ignored by omaha request action because update over
-      // cellular connection is not allowed. Needs to ask for user's permissions
-      // to update.
-      if (code == ErrorCode::kOmahaUpdateIgnoredOverCellular) {
+      // cellular or metered connection is not allowed. Needs to ask for user's
+      // permissions to update.
+      if (code == ErrorCode::kOmahaUpdateIgnoredOverCellular ||
+          code == ErrorCode::kOmahaUpdateIgnoredOverMetered) {
         new_version_ = omaha_response.version;
         new_payload_size_ = 0;
         for (const auto& package : omaha_response.packages) {
@@ -1370,7 +1631,15 @@ void UpdateAttempter::ActionCompleted(ActionProcessor* processor,
       cpu_limiter_.StartLimiter();
       SetStatusAndNotify(UpdateStatus::UPDATE_AVAILABLE);
     }
+  } else if (type == InstallAction::StaticType()) {
+    // TODO(b/236008158): Report metrics here.
+    if (code == ErrorCode::kSuccess) {
+      LOG(INFO) << "InstallAction succeeded.";
+    } else {
+      LOG(INFO) << "InstallAction failed.";
+    }
   }
+
   // General failure cases.
   if (code != ErrorCode::kSuccess) {
     // Best effort to invalidate the previous update by resetting the active
@@ -1399,6 +1668,7 @@ void UpdateAttempter::ActionCompleted(ActionProcessor* processor,
         case UpdateStatus::ATTEMPTING_ROLLBACK:
         case UpdateStatus::DISABLED:
         case UpdateStatus::CLEANUP_PREVIOUS_UPDATE:
+        case UpdateStatus::UPDATED_BUT_DEFERRED:
           MarkDeltaUpdateFailure();
           // Errored out after partition was marked unbootable.
           int64_t num_consecutive_updates = 0;
@@ -1435,13 +1705,7 @@ void UpdateAttempter::ActionCompleted(ActionProcessor* processor,
   }
 }
 
-void UpdateAttempter::BytesReceived(uint64_t bytes_progressed,
-                                    uint64_t bytes_received,
-                                    uint64_t total) {
-  // The PayloadState keeps track of how many bytes were actually downloaded
-  // from a given URL for the URL skipping logic.
-  SystemState::Get()->payload_state()->DownloadProgress(bytes_progressed);
-
+void UpdateAttempter::ProgressUpdate(uint64_t bytes_received, uint64_t total) {
   double progress = 0;
   if (total)
     progress = static_cast<double>(bytes_received) / static_cast<double>(total);
@@ -1453,6 +1717,19 @@ void UpdateAttempter::BytesReceived(uint64_t bytes_progressed,
   }
 }
 
+void UpdateAttempter::BytesReceived(uint64_t bytes_progressed,
+                                    uint64_t bytes_received,
+                                    uint64_t total) {
+  // The PayloadState keeps track of how many bytes were actually downloaded
+  // from a given URL for the URL skipping logic.
+  SystemState::Get()->payload_state()->DownloadProgress(bytes_progressed);
+  ProgressUpdate(bytes_received, total);
+}
+
+void UpdateAttempter::BytesReceived(uint64_t bytes_received, uint64_t total) {
+  ProgressUpdate(bytes_received, total);
+}
+
 void UpdateAttempter::ResetUpdateStatus() {
   // If `GetBootTimeAtUpdate` is true, then the update complete markers exist
   // and there is an update in the inactive partition waiting to be applied.
@@ -1460,7 +1737,11 @@ void UpdateAttempter::ResetUpdateStatus() {
     LOG(INFO)
         << "Cancelling current update but going back to need reboot as there "
            "is an update in the inactive partition that can be applied.";
-    SetStatusAndNotify(UpdateStatus::UPDATED_NEED_REBOOT);
+    if (prefs_->Exists(kPrefsDeferredUpdateCompleted)) {
+      SetStatusAndNotify(UpdateStatus::UPDATED_BUT_DEFERRED);
+    } else {
+      SetStatusAndNotify(UpdateStatus::UPDATED_NEED_REBOOT);
+    }
     return;
   }
   // One full update never completed or there no longer an inactive partition
@@ -1475,13 +1756,14 @@ bool UpdateAttempter::ResetUpdatePrefs() {
   ret_value = prefs->Delete(kPrefsUpdateCompletedBootTime) && ret_value;
   ret_value = prefs->Delete(kPrefsLastFp, {kDlcPrefsSubDir}) && ret_value;
   ret_value = prefs->Delete(kPrefsPreviousVersion) && ret_value;
+  ret_value = prefs->Delete(kPrefsDeferredUpdateCompleted) && ret_value;
   return ret_value;
 }
 
-void UpdateAttempter::InvalidateUpdate() {
+bool UpdateAttempter::InvalidateUpdate() {
   if (!GetBootTimeAtUpdate(nullptr)) {
     LOG(INFO) << "No previous update available to invalidate.";
-    return;
+    return true;
   }
 
   LOG(INFO) << "Invalidating previous update.";
@@ -1497,7 +1779,22 @@ void UpdateAttempter::InvalidateUpdate() {
     success = false;
   }
 
+  LOG(INFO) << "Clearing powerwash and rollback flags, if any.";
+  if (!SystemState::Get()->hardware()->CancelPowerwash()) {
+    LOG(WARNING) << "Failed to cancel powerwash. Continuing anyway.";
+    success = false;
+  }
+  SystemState::Get()->payload_state()->SetRollbackHappened(false);
+
+  LOG(INFO) << "Invalidating firmware update.";
+  if (!SystemState::Get()->hardware()->ResetFWTryNextSlot()) {
+    LOG(WARNING) << "Could not reset firmware slot. Continuing anyway.";
+    success = false;
+  }
+
   SystemState::Get()->metrics_reporter()->ReportInvalidatedUpdate(success);
+
+  return success;
 }
 
 void UpdateAttempter::DownloadComplete() {
@@ -1509,8 +1806,7 @@ void UpdateAttempter::ProgressUpdate(double progress) {
   // too slow.
   if (progress == 1.0 ||
       progress - download_progress_ >= kBroadcastThresholdProgress ||
-      TimeTicks::Now() - last_notify_time_ >=
-          TimeDelta::FromSeconds(kBroadcastThresholdSeconds)) {
+      TimeTicks::Now() - last_notify_time_ >= kBroadcastThreshold) {
     download_progress_ = progress;
     BroadcastStatus();
   }
@@ -1579,7 +1875,23 @@ bool UpdateAttempter::ResetStatus() {
       LOG(INFO) << "Reset status " << (ret_value ? "successful" : "failed");
       return ret_value;
     }
+    case UpdateStatus::UPDATED_BUT_DEFERRED: {
+      bool ret_value = true;
+      status_ = UpdateStatus::IDLE;
+      ret_value = ResetUpdatePrefs() && ret_value;
 
+      // Notify the PayloadState that the successful payload was canceled.
+      SystemState::Get()->payload_state()->ResetUpdateStatus();
+
+      // The previous version is used to report back to omaha after reboot that
+      // we actually rebooted into the new version from this "prev-version". We
+      // need to clear out this value now to prevent it being sent on the next
+      // updatecheck request.
+      ret_value = prefs_->SetString(kPrefsPreviousVersion, "") && ret_value;
+
+      LOG(INFO) << "Reset status " << (ret_value ? "successful" : "failed");
+      return ret_value;
+    }
     default:
       LOG(ERROR) << "Reset not allowed in this state.";
       return false;
@@ -1595,7 +1907,8 @@ bool UpdateAttempter::GetStatus(UpdateEngineStatus* out_status) {
   out_status->new_version = new_version_;
   out_status->is_enterprise_rollback =
       install_plan_ && install_plan_->is_rollback;
-  out_status->is_install = is_install_;
+  out_status->is_install =
+      (pm_ == ProcessMode::INSTALL || pm_ == ProcessMode::SCALED_INSTALL);
   out_status->update_urgency_internal =
       install_plan_ ? install_plan_->update_urgency
                     : update_engine::UpdateUrgencyInternal::REGULAR;
@@ -1615,7 +1928,31 @@ bool UpdateAttempter::GetStatus(UpdateEngineStatus* out_status) {
 
   out_status->last_attempt_error = static_cast<int32_t>(GetLastUpdateError());
 
+  FeatureInternalList features;
+  for (const auto& feature : {update_engine::kFeatureRepeatedUpdates,
+                              update_engine::kFeatureConsumerAutoUpdate}) {
+    bool enabled;
+    if (IsFeatureEnabled(feature, &enabled)) {
+      features.push_back({
+          .name = feature,
+          .enabled = enabled,
+      });
+    } else {
+      LOG(ERROR) << "Failed to read feature (" << feature << ").";
+    }
+  }
+  out_status->features = std::move(features);
+  out_status->is_interactive = omaha_request_params_->interactive();
+  out_status->will_defer_update =
+      install_plan_ &&
+      install_plan_->defer_update_action == DeferUpdateAction::kHold;
+
   return true;
+}
+
+void UpdateAttempter::SetStatusAndNotify(UpdateStatus status) {
+  status_ = status;
+  BroadcastStatus();
 }
 
 ErrorCode UpdateAttempter::GetLastUpdateError() {
@@ -1624,6 +1961,7 @@ ErrorCode UpdateAttempter::GetLastUpdateError() {
     case ErrorCode::kNoUpdate:
     case ErrorCode::kInvalidateLastUpdate:
     case ErrorCode::kOmahaErrorInHTTPResponse:
+    case ErrorCode::kUpdateIgnoredRollbackVersion:
       return attempt_error_code_;
     case ErrorCode::kInternalLibCurlError:
     case ErrorCode::kUnresolvedHostError:
@@ -1682,12 +2020,18 @@ bool UpdateAttempter::ShouldCancel(ErrorCode* cancel_reason) {
     return true;
   }
 
-  return false;
-}
+  // Check if updates are disabled by the enterprise policy. Cancel the download
+  // if disabled.
+  if (SystemState::Get()->update_manager()->PolicyRequest(
+          std::make_unique<EnterpriseUpdateDisabledPolicyImpl>(), nullptr) ==
+      EvalStatus::kSucceeded) {
+    LOG(ERROR) << "Cancelling download as updates have been disabled by "
+                  "enterprise policy";
+    *cancel_reason = ErrorCode::kDownloadCancelledPerPolicy;
+    return true;
+  }
 
-void UpdateAttempter::SetStatusAndNotify(UpdateStatus status) {
-  status_ = status;
-  BroadcastStatus();
+  return false;
 }
 
 void UpdateAttempter::CreatePendingErrorEvent(AbstractAction* action,
@@ -1706,6 +2050,7 @@ void UpdateAttempter::CreatePendingErrorEvent(AbstractAction* action,
   OmahaEvent::Result event_result;
   switch (code) {
     case ErrorCode::kOmahaUpdateIgnoredPerPolicy:
+    case ErrorCode::kUpdateIgnoredRollbackVersion:
     case ErrorCode::kOmahaUpdateDeferredPerPolicy:
     case ErrorCode::kOmahaUpdateDeferredForBackoff:
       event_result = OmahaEvent::kResultUpdateDeferred;
@@ -1735,7 +2080,14 @@ bool UpdateAttempter::ScheduleErrorEventAction() {
   // Send metrics if it was a rollback.
   if (install_plan_ && install_plan_->is_rollback) {
     SystemState::Get()->metrics_reporter()->ReportEnterpriseRollbackMetrics(
-        /*success=*/false, install_plan_->version);
+        metrics::kMetricEnterpriseRollbackFailure, install_plan_->version);
+  }
+
+  if (install_plan_ && (install_plan_->defer_update_action ==
+                            DeferUpdateAction::kApplyAndReboot ||
+                        install_plan_->defer_update_action ==
+                            DeferUpdateAction::kApplyAndShutdown)) {
+    // TODO(kimjae): Report deferred update apply action failure metric.
   }
 
   // Send it to Omaha.
@@ -1756,8 +2108,9 @@ void UpdateAttempter::ScheduleProcessingStart() {
   LOG(INFO) << "Scheduling an action processor start.";
   MessageLoop::current()->PostTask(
       FROM_HERE,
-      Bind([](ActionProcessor* processor) { processor->StartProcessing(); },
-           base::Unretained(processor_.get())));
+      base::BindOnce(
+          [](ActionProcessor* processor) { processor->StartProcessing(); },
+          base::Unretained(processor_.get())));
 }
 
 void UpdateAttempter::DisableDeltaUpdateIfNeeded() {
@@ -1814,7 +2167,11 @@ void UpdateAttempter::PingOmaha() {
   UpdateLastCheckedTime();
 
   // Update the status which will schedule the next update check
-  SetStatusAndNotify(UpdateStatus::UPDATED_NEED_REBOOT);
+  if (prefs_->Exists(kPrefsDeferredUpdateCompleted)) {
+    SetStatusAndNotify(UpdateStatus::UPDATED_BUT_DEFERRED);
+  } else {
+    SetStatusAndNotify(UpdateStatus::UPDATED_NEED_REBOOT);
+  }
   ScheduleUpdates();
 }
 
@@ -1885,8 +2242,6 @@ void UpdateAttempter::UpdateEngineStarted() {
 
   SystemState::Get()->payload_state()->UpdateEngineStarted();
   StartP2PAtStartup();
-
-  excluder_ = CreateExcluder();
 }
 
 void UpdateAttempter::MoveToPrefs(const vector<string>& keys) {
@@ -1950,11 +2305,14 @@ bool UpdateAttempter::GetBootTimeAtUpdate(Time* out_boot_time) {
   string boot_id;
   TEST_AND_RETURN_FALSE(utils::GetBootId(&boot_id));
 
+  // Reboots are allowed when updates get deferred, since they are actually
+  // applied just not active. Hence the check on `kPrefsDeferredUpdate`.
   string update_completed_on_boot_id;
-  if (!prefs_->Exists(kPrefsUpdateCompletedOnBootId) ||
-      !prefs_->GetString(kPrefsUpdateCompletedOnBootId,
-                         &update_completed_on_boot_id) ||
-      update_completed_on_boot_id != boot_id)
+  if (!prefs_->Exists(kPrefsDeferredUpdateCompleted) &&
+      (!prefs_->Exists(kPrefsUpdateCompletedOnBootId) ||
+       !prefs_->GetString(kPrefsUpdateCompletedOnBootId,
+                          &update_completed_on_boot_id) ||
+       update_completed_on_boot_id != boot_id))
     return false;
 
   // Short-circuit avoiding the read in case out_boot_time is nullptr.
@@ -1996,29 +2354,26 @@ bool UpdateAttempter::IsAnyUpdateSourceAllowed() const {
   return false;
 }
 
-bool UpdateAttempter::ChangeRepeatedUpdates(bool enable) {
-  if (!enable &&
-      SystemState::Get()->prefs()->Delete(kPrefsAllowRepeatedUpdates)) {
-    LOG(INFO) << "Repeated updates has been disabled.";
-    return true;
-  }
-  if (enable && SystemState::Get()->prefs()->SetBoolean(
-                    kPrefsAllowRepeatedUpdates, enable)) {
-    LOG(INFO) << "Repeated updates has been enabled.";
-    return true;
-  }
-  LOG(ERROR) << "Could not change " << kPrefsAllowRepeatedUpdates
-             << " feature to " << (enable ? "enabled." : "disabled.");
-  return false;
-}
-
 bool UpdateAttempter::IsRepeatedUpdatesEnabled() {
+  auto* prefs = SystemState::Get()->prefs();
+
+  // Limit the number of repeated updates allowed as a safeguard on client.
+  // Whether consecutive update feature is allowed or not.
+  // Refer to b/201737820.
+  int64_t consecutive_updates = 0;
+  prefs->GetInt64(kPrefsConsecutiveUpdateCount, &consecutive_updates);
+  if (consecutive_updates >= kConsecutiveUpdateLimit) {
+    LOG(WARNING) << "Not allowing repeated updates as limit reached.";
+    return false;
+  }
+
   bool allow_repeated_updates;
   if (!SystemState::Get()->prefs()->GetBoolean(kPrefsAllowRepeatedUpdates,
                                                &allow_repeated_updates)) {
     // Defaulting to true.
-    allow_repeated_updates = true;
+    return true;
   }
+
   return allow_repeated_updates;
 }
 
@@ -2043,6 +2398,92 @@ void UpdateAttempter::ReportTimeToUpdateAppliedMetric() {
                                                        update_delay.InDays());
       }
     }
+  }
+}
+
+bool UpdateAttempter::ToggleFeature(const std::string& feature, bool enable) {
+  bool ret = false;
+  if (feature == update_engine::kFeatureRepeatedUpdates) {
+    ret = utils::ToggleFeature(kPrefsAllowRepeatedUpdates, enable);
+  } else if (feature == update_engine::kFeatureConsumerAutoUpdate) {
+    // Pref will hold "disable" of consumer auto update.
+    // So `not` the incoming `enable` to express this.
+    ret = utils::ToggleFeature(kPrefsConsumerAutoUpdateDisabled, !enable);
+  } else {
+    LOG(WARNING) << "Feature (" << feature << ") is not supported.";
+    ret = false;
+  }
+  // Always broadcast out in case callers cache the values of a feature.
+  BroadcastStatus();
+  return ret;
+}
+
+bool UpdateAttempter::IsFeatureEnabled(const std::string& feature,
+                                       bool* out_enabled) const {
+  if (feature == update_engine::kFeatureRepeatedUpdates) {
+    return utils::IsFeatureEnabled(kPrefsAllowRepeatedUpdates, out_enabled);
+  }
+  if (feature == update_engine::kFeatureConsumerAutoUpdate) {
+    bool consumer_auto_update_disabled = false;
+    if (!utils::IsFeatureEnabled(kPrefsConsumerAutoUpdateDisabled,
+                                 &consumer_auto_update_disabled)) {
+      return false;
+    }
+    *out_enabled = !consumer_auto_update_disabled;
+    return true;
+  }
+  LOG(WARNING) << "Feature (" << feature << ") is not supported.";
+  return false;
+}
+
+void UpdateAttempter::RootfsIntegrityCheck() const {
+  int error_counter = kErrorCounterZeroValue;
+  auto* boot_control = SystemState::Get()->boot_control();
+  if (!boot_control->GetErrorCounter(boot_control->GetCurrentSlot(),
+                                     &error_counter)) {
+    LOG(ERROR)
+        << "Failed to get error counter, skipping rootfs integrity check.";
+    return;
+  }
+
+  // Don't need to integrity check unless kernel has non-zero error counter.
+  if (error_counter == kErrorCounterZeroValue) {
+    LOG(INFO)
+        << "Error counter is zero value, skipping rootfs integrity check.";
+    return;
+  }
+
+  if (!SystemState::Get()->hardware()->IsRootfsVerificationEnabled()) {
+    LOG(INFO)
+        << "Rootfs verification is disable, skipping rootfs integrity check.";
+    return;
+  }
+
+  if (Subprocess::Get().Exec(
+          {"/bin/dd", "if=/dev/dm-0", "of=/dev/null", "bs=1MiB"},
+          base::BindOnce(&UpdateAttempter::OnRootfsIntegrityCheck,
+                         weak_ptr_factory_.GetWeakPtr())) == 0) {
+    LOG(ERROR) << "Failed to launch rootfs integrity check process.";
+    return;
+  }
+}
+
+void UpdateAttempter::OnRootfsIntegrityCheck(int ret_code,
+                                             const std::string& output) const {
+  if (ret_code != 0) {
+    LOG(ERROR) << "Rootfs integrity check failed with return code=" << ret_code
+               << " will not reset error counter.";
+    return;
+  }
+
+  LOG(INFO) << "Rootfs integrity check succeeded, resetting error counter.";
+
+  auto* boot_control = SystemState::Get()->boot_control();
+  if (!boot_control->SetErrorCounter(boot_control->GetCurrentSlot(),
+                                     kErrorCounterZeroValue)) {
+    LOG(ERROR) << "Failed to set error counter back to "
+               << kErrorCounterZeroValue;
+    return;
   }
 }
 

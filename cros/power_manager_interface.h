@@ -19,8 +19,6 @@
 
 #include <memory>
 
-#include <base/macros.h>
-
 namespace chromeos_update_engine {
 
 class PowerManagerInterface {
@@ -32,6 +30,9 @@ class PowerManagerInterface {
 
   // Request the power manager to restart the device. Returns true on success.
   virtual bool RequestReboot() = 0;
+
+  // Request the power manager to shutdown the device. Returns true on success.
+  virtual bool RequestShutdown() = 0;
 
  protected:
   PowerManagerInterface() = default;

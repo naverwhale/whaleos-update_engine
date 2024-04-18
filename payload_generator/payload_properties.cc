@@ -55,16 +55,17 @@ PayloadProperties::PayloadProperties(const string& payload_path)
 bool PayloadProperties::GetPropertiesAsJson(string* json_str) {
   TEST_AND_RETURN_FALSE(LoadFromPayload());
 
-  base::DictionaryValue properties;
-  properties.SetInteger(kPayloadPropertyJsonVersion, version_);
-  properties.SetInteger(kPayloadPropertyJsonMetadataSize, metadata_size_);
-  properties.SetString(kPayloadPropertyJsonMetadataSignature,
-                       metadata_signatures_);
-  properties.SetInteger(kPayloadPropertyJsonPayloadSize, payload_size_);
-  properties.SetString(kPayloadPropertyJsonPayloadHash, payload_hash_);
-  properties.SetBoolean(kPayloadPropertyJsonIsDelta, is_delta_);
+  auto properties =
+      base::Value::Dict()
+          .Set(kPayloadPropertyJsonVersion, version_)
+          .Set(kPayloadPropertyJsonMetadataSize,
+               static_cast<int>(metadata_size_))
+          .Set(kPayloadPropertyJsonMetadataSignature, metadata_signatures_)
+          .Set(kPayloadPropertyJsonPayloadSize, static_cast<int>(payload_size_))
+          .Set(kPayloadPropertyJsonPayloadHash, payload_hash_)
+          .Set(kPayloadPropertyJsonIsDelta, is_delta_);
 
-  return base::JSONWriter::Write(properties, json_str);
+  return base::JSONWriter::Write(std::move(properties), json_str);
 }
 
 bool PayloadProperties::GetPropertiesAsKeyValue(string* key_value_str) {

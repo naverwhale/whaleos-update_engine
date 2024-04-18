@@ -22,9 +22,9 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/strings/stringprintf.h>
 #include <base/test/simple_test_clock.h>
@@ -66,8 +66,8 @@ class DownloadActionChromeosTest : public ::testing::Test {
 };
 
 namespace {
-constexpr base::TimeDelta kHour = base::TimeDelta::FromHours(1);
-constexpr base::TimeDelta kMinute = base::TimeDelta::FromMinutes(1);
+constexpr base::TimeDelta kHour = base::Hours(1);
+constexpr base::TimeDelta kMinute = base::Minutes(1);
 
 class DownloadActionTestProcessorDelegate : public ActionProcessorDelegate {
  public:
@@ -199,7 +199,7 @@ void TestWithData(const brillo::Blob& data,
 
   loop.PostTask(
       FROM_HERE,
-      base::Bind(&StartProcessorInRunLoop, &processor, http_fetcher_ptr));
+      base::BindOnce(&StartProcessorInRunLoop, &processor, http_fetcher_ptr));
   loop.Run();
   EXPECT_FALSE(loop.PendingTasks());
 
@@ -330,7 +330,7 @@ TEST(DownloadActionTest, MultiPayloadProgressTest) {
 
   loop.PostTask(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           [](ActionProcessor* processor) { processor->StartProcessing(); },
           base::Unretained(&processor)));
   loop.Run();
@@ -387,7 +387,7 @@ void TestTerminateEarly(bool use_download_delegate) {
     processor.EnqueueAction(std::move(download_action));
 
     loop.PostTask(FROM_HERE,
-                  base::Bind(&TerminateEarlyTestStarter, &processor));
+                  base::BindOnce(&TerminateEarlyTestStarter, &processor));
     loop.Run();
     EXPECT_FALSE(loop.PendingTasks());
   }
@@ -497,7 +497,7 @@ TEST(DownloadActionTest, PassObjectOutTest) {
 
   loop.PostTask(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           [](ActionProcessor* processor) { processor->StartProcessing(); },
           base::Unretained(&processor)));
   loop.Run();
@@ -535,7 +535,7 @@ class P2PDownloadActionTest : public testing::Test {
     // Setup p2p.
     FakeP2PManagerConfiguration* test_conf = new FakeP2PManagerConfiguration();
     p2p_manager_.reset(P2PManager::Construct(
-        test_conf, &fake_um_, "cros_au", 3, base::TimeDelta::FromDays(5)));
+        test_conf, &fake_um_, "cros_au", 3, base::Days(5)));
     FakeSystemState::Get()->set_p2p_manager(p2p_manager_.get());
   }
 
@@ -546,6 +546,9 @@ class P2PDownloadActionTest : public testing::Test {
     EXPECT_CALL(*FakeSystemState::Get()->mock_payload_state(),
                 GetUsingP2PForSharing())
         .WillRepeatedly(Return(use_p2p_to_share));
+    EXPECT_CALL(*FakeSystemState::Get()->mock_call_wrapper(),
+                AmountOfFreeDiskSpace(_))
+        .WillRepeatedly(Return(data_.length() * 2));
 
     ScopedTempFile output_temp_file;
     TestDirectFileWriter writer;
@@ -574,7 +577,7 @@ class P2PDownloadActionTest : public testing::Test {
 
     loop_.PostTask(
         FROM_HERE,
-        base::Bind(
+        base::BindOnce(
             [](P2PDownloadActionTest* action_test, HttpFetcher* http_fetcher) {
               action_test->processor_.StartProcessing();
               http_fetcher->SetOffset(action_test->start_at_offset_);
@@ -635,6 +638,9 @@ TEST_F(P2PDownloadActionTest, DeleteIfHoleExists) {
 
 TEST_F(P2PDownloadActionTest, CanAppend) {
   SetupDownload(1000);  // starting_offset
+  EXPECT_CALL(*FakeSystemState::Get()->mock_call_wrapper(),
+              AmountOfFreeDiskSpace(_))
+      .WillOnce(Return(data_.length() * 2));
 
   // Prepare the file with existing data before starting to write to
   // it via DownloadAction.
@@ -669,6 +675,9 @@ TEST_F(P2PDownloadActionTest, CanAppend) {
 
 TEST_F(P2PDownloadActionTest, DeletePartialP2PFileIfResumingWithoutP2P) {
   SetupDownload(1000);  // starting_offset
+  EXPECT_CALL(*FakeSystemState::Get()->mock_call_wrapper(),
+              AmountOfFreeDiskSpace(_))
+      .WillOnce(Return(data_.length() * 2));
 
   // Prepare the file with all existing data before starting to write
   // to it via DownloadAction.
@@ -699,6 +708,9 @@ TEST_F(P2PDownloadActionTest, MultiplePayload) {
   EXPECT_CALL(*FakeSystemState::Get()->mock_payload_state(),
               GetUsingP2PForSharing())
       .WillRepeatedly(Return(true));
+  EXPECT_CALL(*FakeSystemState::Get()->mock_call_wrapper(),
+              AmountOfFreeDiskSpace(_))
+      .WillRepeatedly(Return(data_.length() * 2));
 
   EXPECT_CALL(*FakeSystemState::Get()->mock_payload_state(), NextPayload())
       .WillOnce(Return(true));
@@ -730,14 +742,13 @@ TEST_F(P2PDownloadActionTest, MultiplePayload) {
 
   loop_.PostTask(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           [](ActionProcessor* processor) { processor->StartProcessing(); },
           base::Unretained(&processor_)));
   loop_.Run();
   EXPECT_FALSE(loop_.PendingTasks());
 
   EXPECT_EQ(2, p2p_manager_->CountSharedFiles());
-  size_t offset = 0;
   for (auto& payload : install_plan.payloads) {
     string file_id = utils::CalculateP2PFileId(payload.hash, payload.size);
     EXPECT_EQ(payload.size, p2p_manager_->FileGetSize(file_id));
@@ -745,7 +756,6 @@ TEST_F(P2PDownloadActionTest, MultiplePayload) {
     EXPECT_TRUE(
         ReadFileToString(p2p_manager_->FileGetPath(file_id), &file_content));
     EXPECT_EQ(data_.substr(0, payload.size), file_content);
-    offset += payload.size;
   }
 
   // We don't use the |delegate_| in this test. So just sets it's processing

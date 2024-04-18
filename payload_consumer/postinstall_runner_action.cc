@@ -24,11 +24,11 @@
 #include <unistd.h>
 
 #include <cmath>
+#include <iterator>
 
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 
@@ -95,9 +95,17 @@ void PostinstallRunnerAction::PerformAction() {
 }
 
 void PostinstallRunnerAction::PerformPartitionPostinstall() {
-  if (install_plan_.download_url.empty()) {
-    LOG(INFO) << "Skipping post-install during rollback";
-    return CompletePostinstall(ErrorCode::kSuccess);
+  switch (install_plan_.defer_update_action) {
+    case DeferUpdateAction::kOff:
+      if (install_plan_.download_url.empty()) {
+        LOG(INFO) << "Skipping post-install during rollback";
+        return CompletePostinstall(ErrorCode::kSuccess);
+      }
+      break;
+    case DeferUpdateAction::kHold:
+    case DeferUpdateAction::kApplyAndReboot:
+    case DeferUpdateAction::kApplyAndShutdown:
+      break;
   }
 
   // Skip all the partitions that don't have a post-install step.
@@ -175,12 +183,35 @@ void PostinstallRunnerAction::PerformPartitionPostinstall() {
   // Chrome OS postinstall expects the target rootfs as the first parameter.
   command.push_back(partition.target_path);
 
+  // Defer update action to apply.
+  switch (install_plan_.defer_update_action) {
+    case DeferUpdateAction::kOff:
+      break;
+    case DeferUpdateAction::kHold:
+      LOG(INFO) << "Defer update action: hold";
+      command.push_back("--defer_update_action=hold");
+      break;
+    case DeferUpdateAction::kApplyAndReboot:
+    case DeferUpdateAction::kApplyAndShutdown:
+      LOG(INFO) << "Defer update action: apply";
+      command.push_back("--defer_update_action=apply");
+      break;
+  }
+
+  // Force fw update if requested.
+  if (force_fw_update_) {
+    LOG(INFO) << "Forcing firmware update.";
+    command.push_back("--force_update_firmware");
+  } else {
+    LOG(INFO) << "Not forcing firmware update.";
+  }
+
   current_command_ = Subprocess::Get().ExecFlags(
       command,
       Subprocess::kRedirectStderrToStdout,
       {kPostinstallStatusFd},
-      base::Bind(&PostinstallRunnerAction::CompletePartitionPostinstall,
-                 base::Unretained(this)));
+      base::BindOnce(&PostinstallRunnerAction::CompletePartitionPostinstall,
+                     base::Unretained(this)));
   // Subprocess::Exec should never return a negative process id.
   CHECK_GE(current_command_, 0);
 
@@ -210,7 +241,7 @@ void PostinstallRunnerAction::OnProgressFdReady() {
     bytes_read = 0;
     bool eof;
     bool ok =
-        utils::ReadAll(progress_fd_, buf, base::size(buf), &bytes_read, &eof);
+        utils::ReadAll(progress_fd_, buf, std::size(buf), &bytes_read, &eof);
     progress_buffer_.append(buf, bytes_read);
     // Process every line.
     vector<string> lines = base::SplitString(
@@ -342,7 +373,16 @@ void PostinstallRunnerAction::CompletePostinstall(ErrorCode error_code) {
         hardware_->SetWarmReset(true);
       }
     } else if (install_plan_.run_post_install) {
-      error_code = ErrorCode::kUpdatedButNotActive;
+      switch (install_plan_.defer_update_action) {
+        case DeferUpdateAction::kOff:
+          error_code = ErrorCode::kUpdatedButNotActive;
+          break;
+        case DeferUpdateAction::kHold:
+        case DeferUpdateAction::kApplyAndReboot:
+        case DeferUpdateAction::kApplyAndShutdown:
+          error_code = ErrorCode::kSuccess;
+          break;
+      }
     }
   }
 

@@ -20,7 +20,6 @@
 #include <memory>
 #include <string>
 
-#include <base/macros.h>
 #include <dbus/object_path.h>
 
 #include "update_engine/cros/connection_manager_interface.h"
@@ -43,9 +42,8 @@ class ConnectionManager : public ConnectionManagerInterface {
 
   // ConnectionManagerInterface overrides.
   bool GetConnectionProperties(ConnectionType* out_type,
-                               ConnectionTethering* out_tethering) override;
-  bool IsUpdateAllowedOver(ConnectionType type,
-                           ConnectionTethering tethering) const override;
+                               bool* out_metered) override;
+  bool IsUpdateAllowedOverMetered() const override;
   bool IsAllowedConnectionTypesForUpdateSet() const override;
 
  private:
@@ -55,7 +53,7 @@ class ConnectionManager : public ConnectionManagerInterface {
 
   bool GetServicePathProperties(const dbus::ObjectPath& path,
                                 ConnectionType* out_type,
-                                ConnectionTethering* out_tethering);
+                                bool* out_metered);
 
   // The mockable interface to access the shill DBus proxies.
   std::unique_ptr<ShillProxyInterface> shill_proxy_;

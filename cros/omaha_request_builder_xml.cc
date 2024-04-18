@@ -18,16 +18,17 @@
 
 #include <inttypes.h>
 
+#include <memory>
 #include <numeric>
 #include <string>
 
-#include <base/guid.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
+#include <base/uuid.h>
 
 #include "update_engine/common/constants.h"
 #include "update_engine/common/cros_healthd_interface.h"
@@ -157,6 +158,17 @@ string OmahaRequestBuilderXml::GetAppBody(const OmahaAppData& app_data) const {
           // Rollback requires target_version_prefix set.
           if (params->rollback_allowed()) {
             app_body += " rollback_allowed=\"true\"";
+            // FSI version or activation date will help goldeneye decide whether
+            // it is safe to run a certain rollback image.
+            if (!params->fsi_version().empty()) {
+              app_body += base::StringPrintf(
+                  " fsi_version=\"%s\"",
+                  XmlEncodeWithDefault(params->fsi_version()).c_str());
+            } else if (!params->activate_date().empty()) {
+              app_body += base::StringPrintf(
+                  " activate_date=\"%s\"",
+                  XmlEncodeWithDefault(params->activate_date()).c_str());
+            }
           }
         }
         if (!params->release_lts_tag().empty()) {
@@ -426,21 +438,33 @@ string OmahaRequestBuilderXml::GetOs() const {
 }
 
 string OmahaRequestBuilderXml::GetRequest() const {
-  const auto* params = SystemState::Get()->request_params();
+  auto* system_state = SystemState::Get();
+  const auto* params = system_state->request_params();
+
   string os_xml = GetOs();
   string app_xml = GetApps();
   string hw_xml = GetHw();
+  // Valid recovery keys that will be sent are "" or "[0-9]+".
+  string recovery_key_version;
+  if (!system_state->hardware()->GetRecoveryKeyVersion(&recovery_key_version)) {
+    LOG(ERROR) << "Failed to get recovery key version.";
+  }
 
   string request_xml = base::StringPrintf(
       "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
       "<request requestid=\"%s\" sessionid=\"%s\""
       " protocol=\"3.0\" updater=\"%s\" updaterversion=\"%s\""
-      " installsource=\"%s\" ismachine=\"1\">\n%s%s%s</request>\n",
-      base::GenerateGUID().c_str() /* requestid */,
+      " installsource=\"%s\" ismachine=\"1\" recoverykeyversion=\"%s\" "
+      "%s>\n%s%s%s</request>\n",
+      base::Uuid::GenerateRandomV4()
+          .AsLowercaseString()
+          .c_str() /* requestid */,
       session_id_.c_str(),
       constants::kOmahaUpdaterID,
       kOmahaUpdaterVersion,
       params->interactive() ? "ondemandupdate" : "scheduler",
+      recovery_key_version.c_str(),
+      (system_state->hardware()->IsRunningFromMiniOs() ? "isminios=\"1\"" : ""),
       os_xml.c_str(),
       app_xml.c_str(),
       hw_xml.c_str());
@@ -449,7 +473,8 @@ string OmahaRequestBuilderXml::GetRequest() const {
 }
 
 string OmahaRequestBuilderXml::GetApps() const {
-  const auto* params = SystemState::Get()->request_params();
+  auto* system_state = SystemState::Get();
+  const auto* params = system_state->request_params();
   string app_xml = "";
   OmahaAppData product_app = {
       .id = params->GetAppId(),
@@ -477,9 +502,9 @@ string OmahaRequestBuilderXml::GetApps() const {
   // Do not do MiniOS updates when in recovery yet. Do not send MiniOS update
   // checks if there is no MiniOS marker in the kernel partitions. This means
   // the device does not support MiniOS.
-  std::string value;
-  if (!SystemState::Get()->hardware()->IsRunningFromMiniOs() &&
-      SystemState::Get()->boot_control()->SupportsMiniOSPartitions()) {
+  if (!system_state->hardware()->IsRunningFromMiniOs() &&
+      system_state->boot_control()->SupportsMiniOSPartitions() &&
+      !params->is_install()) {
     auto minios_params = params->minios_app_params();
     OmahaAppData minios_app = {
         .id = params->GetAppId() + kMiniOsAppIdSuffix,
@@ -503,7 +528,15 @@ string OmahaRequestBuilderXml::GetHw() const {
     return "";
 
   auto* telemetry_info = SystemState::Get()->cros_healthd()->GetTelemetryInfo();
-  string hw_xml = base::StringPrintf(
+  std::unique_ptr<TelemetryInfo> default_telemetry_info;
+  if (!telemetry_info) {
+    LOG(WARNING) << "No telemetry data was reported from cros_healthd. Use "
+                    "empty value to build hw details.";
+    default_telemetry_info = std::make_unique<TelemetryInfo>();
+    telemetry_info = default_telemetry_info.get();
+  }
+
+  std::string hw_xml = base::StringPrintf(
       "    <hw"
       " vendor_name=\"%s\""
       " product_name=\"%s\""
@@ -518,18 +551,18 @@ string OmahaRequestBuilderXml::GetHw() const {
       " cpu_name=\"%s\""
       " wireless_drivers=\"%s\""
       " wireless_ids=\"%s\""
+      " gpu_drivers=\"%s\""
       " gpu_ids=\"%s\""
       " />\n",
-      XmlEncodeWithDefault(telemetry_info->system_v2_info.dmi_info.board_vendor)
+      XmlEncodeWithDefault(telemetry_info->system_info.dmi_info.sys_vendor)
           .c_str(),
-      XmlEncodeWithDefault(telemetry_info->system_v2_info.dmi_info.board_name)
+      XmlEncodeWithDefault(telemetry_info->system_info.dmi_info.product_name)
           .c_str(),
-      XmlEncodeWithDefault(
-          telemetry_info->system_v2_info.dmi_info.board_version)
+      XmlEncodeWithDefault(telemetry_info->system_info.dmi_info.product_version)
           .c_str(),
-      XmlEncodeWithDefault(telemetry_info->system_v2_info.dmi_info.bios_version)
+      XmlEncodeWithDefault(telemetry_info->system_info.dmi_info.bios_version)
           .c_str(),
-      static_cast<int32_t>(telemetry_info->system_v2_info.os_info.boot_mode),
+      static_cast<int32_t>(telemetry_info->system_info.os_info.boot_mode),
       telemetry_info->memory_info.total_memory_kib,
       // Note: Summing the entire non-removable disk sizes.
       std::accumulate(std::begin(telemetry_info->block_device_info),
@@ -547,6 +580,7 @@ string OmahaRequestBuilderXml::GetHw() const {
           .c_str(),
       XmlEncodeWithDefault(telemetry_info->GetWirelessDrivers()).c_str(),
       XmlEncodeWithDefault(telemetry_info->GetWirelessIds()).c_str(),
+      XmlEncodeWithDefault(telemetry_info->GetGpuDrivers()).c_str(),
       XmlEncodeWithDefault(telemetry_info->GetGpuIds()).c_str());
   return hw_xml;
 }

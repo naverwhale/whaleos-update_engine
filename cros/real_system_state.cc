@@ -20,12 +20,14 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
+#include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/time/time.h>
 #include <brillo/message_loops/message_loop.h>
+#include <chromeos/constants/imageloader.h>
 #include <chromeos/dbus/service_constants.h>
 
 #include "update_engine/common/boot_control.h"
@@ -78,9 +80,27 @@ bool RealSystemState::Initialize() {
     return false;
   }
 
+  dlc_utils_ = CreateDlcUtils();
+  if (!dlc_utils_) {
+    LOG(ERROR) << "Error initializing the DlcUtilsInterface.";
+    return false;
+  }
+
   cros_healthd_ = CreateCrosHealthd();
-  if (!cros_healthd_ || !cros_healthd_->Init()) {
+  if (!cros_healthd_) {
     LOG(ERROR) << "Error initializing the CrosHealthdInterface,";
+    return false;
+  }
+
+  call_wrapper_ = CreateCallWrapper();
+  if (!call_wrapper_) {
+    LOG(ERROR) << "Error initializing the CallWrapperInterface.";
+    return false;
+  }
+
+  hibernate_ = CreateHibernateService();
+  if (!hibernate_) {
+    LOG(ERROR) << "Error initializing the HibernateInterface";
     return false;
   }
 
@@ -153,17 +173,14 @@ bool RealSystemState::Initialize() {
     return false;
   }
   update_manager_.reset(new chromeos_update_manager::UpdateManager(
-      base::TimeDelta::FromSeconds(5),
-      base::TimeDelta::FromHours(12),
-      um_state));
+      base::Seconds(5), base::Hours(12), um_state));
 
   // The P2P Manager depends on the Update Manager for its initialization.
-  p2p_manager_.reset(
-      P2PManager::Construct(nullptr,
-                            update_manager_.get(),
-                            "cros_au",
-                            kMaxP2PFilesToKeep,
-                            base::TimeDelta::FromDays(kMaxP2PFileAgeDays)));
+  p2p_manager_.reset(P2PManager::Construct(nullptr,
+                                           update_manager_.get(),
+                                           "cros_au",
+                                           kMaxP2PFilesToKeep,
+                                           kMaxP2PFileAge));
 
   if (!payload_state_.Initialize()) {
     LOG(ERROR) << "Failed to initialize the payload state object.";

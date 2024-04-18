@@ -32,7 +32,8 @@ class MockMetricsReporter : public MetricsReporterInterface {
   MOCK_METHOD1(ReportRollbackMetrics, void(metrics::RollbackResult result));
 
   MOCK_METHOD2(ReportEnterpriseRollbackMetrics,
-               void(bool success, const std::string& rollback_version));
+               void(const std::string& metric,
+                    const std::string& rollback_version));
 
   MOCK_METHOD1(ReportDailyMetrics, void(base::TimeDelta os_age));
 
@@ -80,6 +81,11 @@ class MockMetricsReporter : public MetricsReporterInterface {
   MOCK_METHOD1(ReportTimeToReboot, void(int time_to_reboot_minutes));
 
   MOCK_METHOD1(ReportInvalidatedUpdate, void(bool success));
+
+  MOCK_METHOD(void,
+              ReportEnterpriseUpdateInvalidatedResult,
+              (bool success),
+              (override));
 
   MOCK_METHOD2(ReportInstallDateProvisioningSource, void(int source, int max));
 

@@ -16,7 +16,7 @@
 
 #include "update_engine/update_boot_flags_action.h"
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 
 #include "update_engine/common/boot_control.h"
@@ -49,8 +49,8 @@ void UpdateBootFlagsAction::PerformAction() {
   is_running_ = true;
   LOG(INFO) << "Marking booted slot as good.";
   if (!boot_control_->MarkBootSuccessfulAsync(
-          base::Bind(&UpdateBootFlagsAction::CompleteUpdateBootFlags,
-                     base::Unretained(this)))) {
+          base::BindOnce(&UpdateBootFlagsAction::CompleteUpdateBootFlags,
+                         base::Unretained(this)))) {
     CompleteUpdateBootFlags(false);
   }
 }

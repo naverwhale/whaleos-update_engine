@@ -21,12 +21,16 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
+#if USE_LVM_STATEFUL_PARTITION
+#include <brillo/blkdev_utils/lvm.h>
+#include <brillo/blkdev_utils/lvm_device.h>
+#endif  // USE_LVM_STATEFUL_PARTITION
 #include <chromeos/constants/imageloader.h>
 #include <rootdev/rootdev.h>
 
@@ -52,6 +56,7 @@ const char* kChromeOSPartitionNameMiniOS = "minios";
 const char* kAndroidPartitionNameKernel = "boot";
 const char* kAndroidPartitionNameRoot = "system";
 
+// TODO(kimjae): Create constants/enum values for partitions in system_api.
 const int kMiniOsPartitionANum = 9;
 
 const char kPartitionNamePrefixDlc[] = "dlc";
@@ -83,10 +88,10 @@ string GetBootDevice() {
 // ExecCallback called when the execution of setgoodkernel finishes. Notifies
 // the caller of MarkBootSuccessfullAsync() by calling |callback| with the
 // result.
-void OnMarkBootSuccessfulDone(base::Callback<void(bool)> callback,
+void OnMarkBootSuccessfulDone(base::OnceCallback<void(bool)> callback,
                               int return_code,
                               const string& output) {
-  callback.Run(return_code == 0);
+  std::move(callback).Run(return_code == 0);
 }
 
 // Will return the partition corresponding to slot B to update into Slot A.
@@ -108,6 +113,15 @@ string GetBootDeviceForMiniOs() {
   LOG(INFO) << "Running in MiniOs, set boot device to: " << boot_device;
   return boot_device;
 }
+
+// Use macros as it's LVM stateful partition specific.
+#if USE_LVM_STATEFUL_PARTITION
+std::string DlcLogicalVolumeName(
+    const std::string& dlc_id,
+    chromeos_update_engine::BootControlInterface::Slot slot) {
+  return "dlc_" + dlc_id + (slot == 0 ? "_a" : "_b");
+}
+#endif  // USE_LVM_STATEFUL_PARTITION
 
 }  // namespace
 
@@ -191,6 +205,22 @@ BootControlInterface::Slot BootControlChromeOS::GetCurrentSlot() const {
   return current_slot_;
 }
 
+BootControlInterface::Slot BootControlChromeOS::GetFirstInactiveSlot() const {
+  if (GetCurrentSlot() == BootControlInterface::kInvalidSlot ||
+      GetNumSlots() < 2)
+    return BootControlInterface::kInvalidSlot;
+
+  for (Slot slot = 0; slot < GetNumSlots(); slot++) {
+    if (slot != GetCurrentSlot())
+      return slot;
+  }
+  return BootControlInterface::kInvalidSlot;
+}
+
+base::FilePath BootControlChromeOS::GetBootDevicePath() const {
+  return base::FilePath{boot_disk_name_};
+}
+
 bool BootControlChromeOS::ParseDlcPartitionName(
     const std::string partition_name,
     std::string* dlc_id,
@@ -235,6 +265,29 @@ bool BootControlChromeOS::GetPartitionDevice(const std::string& partition_name,
                   .Append(slot == 0 ? kPartitionNameDlcA : kPartitionNameDlcB)
                   .Append(kPartitionNameDlcImage)
                   .value();
+#if USE_LVM_STATEFUL_PARTITION
+    // Override with logical volume path if valid.
+    // DLC logical volumes follow a specific naming scheme.
+    brillo::LogicalVolumeManager lvm;
+    std::string lv_name = DlcLogicalVolumeName(dlc_id, slot);
+    // Stateful is always partition number 1 in CrOS.
+    auto stateful_part = utils::MakePartitionName(boot_disk_name_, 1);
+    if (auto pv = lvm.GetPhysicalVolume(base::FilePath(stateful_part));
+        !pv || !pv->IsValid()) {
+      LOG(WARNING) << "Could not get physical volume from " << stateful_part;
+    } else if (auto vg = lvm.GetVolumeGroup(*pv); !vg || !vg->IsValid()) {
+      LOG(WARNING) << "Could not get volume group from "
+                   << pv->GetPath().value();
+    } else if (auto lv = lvm.GetLogicalVolume(*vg, lv_name);
+               !lv || !lv->IsValid()) {
+      LOG(WARNING) << "Could not get logical volume (" << lv_name << ") from "
+                   << vg->GetName();
+    } else {
+      auto lv_path = lv->GetPath().value();
+      LOG(INFO) << "Overriding to logical volume path at " << lv_path;
+      *device = lv_path;
+    }
+#endif  // USE_LVM_STATEFUL_PARTITION
     return true;
   }
   int partition_num = GetPartitionNumber(partition_name, slot);
@@ -256,6 +309,50 @@ bool BootControlChromeOS::GetPartitionDevice(const string& partition_name,
                                              BootControlInterface::Slot slot,
                                              string* device) const {
   return GetPartitionDevice(partition_name, slot, false, device, nullptr);
+}
+
+bool BootControlChromeOS::GetErrorCounter(BootControlInterface::Slot slot,
+                                          int* error_counter) const {
+  int partition_num = GetPartitionNumber(kChromeOSPartitionNameKernel, slot);
+  if (partition_num < 0)
+    return false;
+
+  CgptAddParams params;
+  memset(&params, '\0', sizeof(params));
+  params.drive_name = const_cast<char*>(boot_disk_name_.c_str());
+  params.partition = partition_num;
+
+  int retval = CgptGetPartitionDetails(&params);
+  if (retval != CGPT_OK)
+    return false;
+
+  *error_counter = params.error_counter;
+  return true;
+}
+
+bool BootControlChromeOS::SetErrorCounter(BootControlInterface::Slot slot,
+                                          int error_counter) {
+  int partition_num = GetPartitionNumber(kChromeOSPartitionNameKernel, slot);
+  if (partition_num < 0)
+    return false;
+
+  CgptAddParams add_params;
+  memset(&add_params, 0, sizeof(add_params));
+
+  add_params.drive_name = const_cast<char*>(boot_disk_name_.c_str());
+  add_params.partition = partition_num;
+
+  add_params.error_counter = error_counter;
+  add_params.set_error_counter = 1;
+
+  int retval = CgptSetAttributes(&add_params);
+  if (retval != CGPT_OK) {
+    LOG(ERROR) << "Unable to set error_counter to " << add_params.tries
+               << " for slot " << SlotName(slot) << " (partition "
+               << partition_num << ").";
+    return false;
+  }
+  return true;
 }
 
 bool BootControlChromeOS::IsSlotBootable(Slot slot) const {
@@ -363,10 +460,10 @@ bool BootControlChromeOS::MarkBootSuccessful() {
 }
 
 bool BootControlChromeOS::MarkBootSuccessfulAsync(
-    base::Callback<void(bool)> callback) {
-  return Subprocess::Get().Exec(
-             {kSetGoodKernel},
-             base::Bind(&OnMarkBootSuccessfulDone, callback)) != 0;
+    base::OnceCallback<void(bool)> callback) {
+  return Subprocess::Get().Exec({kSetGoodKernel},
+                                base::BindOnce(&OnMarkBootSuccessfulDone,
+                                               std::move(callback))) != 0;
 }
 
 // static
@@ -483,6 +580,17 @@ bool BootControlChromeOS::SupportsMiniOSPartitions() {
   CgptFindParams cgpt_params = {.set_label = 1, .label = kMiniOSLabelA};
   CgptFind(&cgpt_params);
   return cgpt_params.hits == 1;
+}
+
+bool BootControlChromeOS::IsLvmStackEnabled(brillo::LogicalVolumeManager* lvm) {
+  if (!is_lvm_stack_enabled_.has_value()) {
+    // Cache the value.
+    // Stateful partition will always be in partition 1 in CrOS.
+    auto pv = lvm->GetPhysicalVolume(base::FilePath(
+        utils::MakePartitionName(GetBootDevicePath().value(), 1)));
+    is_lvm_stack_enabled_ = pv.has_value() && pv->IsValid();
+  }
+  return is_lvm_stack_enabled_.value();
 }
 
 }  // namespace chromeos_update_engine

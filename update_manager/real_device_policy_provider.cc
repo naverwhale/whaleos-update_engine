@@ -23,6 +23,8 @@
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/time/time.h>
+#include <base/types/expected.h>
+#include <oobe_config/metrics/enterprise_rollback_metrics_tracking.h>
 #include <policy/device_policy.h>
 
 #include "update_engine/common/connection_utils.h"
@@ -39,7 +41,7 @@ using std::vector;
 
 namespace {
 
-const int kDevicePolicyRefreshRateInMinutes = 60;
+const TimeDelta kDevicePolicyRefreshRateTime = base::Minutes(60);
 
 constexpr char kMarketSegmentUnknown[] = "unknown";
 constexpr char kMarketSegmentEducation[] = "education";
@@ -62,10 +64,11 @@ bool RealDevicePolicyProvider::Init() {
   // We also listen for signals from the session manager to force a device
   // policy refresh.
   session_manager_proxy_->RegisterPropertyChangeCompleteSignalHandler(
-      base::Bind(&RealDevicePolicyProvider::OnPropertyChangedCompletedSignal,
-                 base::Unretained(this)),
-      base::Bind(&RealDevicePolicyProvider::OnSignalConnected,
-                 base::Unretained(this)));
+      base::BindRepeating(
+          &RealDevicePolicyProvider::OnPropertyChangedCompletedSignal,
+          base::Unretained(this)),
+      base::BindOnce(&RealDevicePolicyProvider::OnSignalConnected,
+                     base::Unretained(this)));
   return true;
 }
 
@@ -100,9 +103,10 @@ void RealDevicePolicyProvider::RefreshDevicePolicyAndReschedule() {
   RefreshDevicePolicy();
   scheduled_refresh_ = MessageLoop::current()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&RealDevicePolicyProvider::RefreshDevicePolicyAndReschedule,
-                 base::Unretained(this)),
-      TimeDelta::FromMinutes(kDevicePolicyRefreshRateInMinutes));
+      base::BindOnce(
+          &RealDevicePolicyProvider::RefreshDevicePolicyAndReschedule,
+          base::Unretained(this)),
+      kDevicePolicyRefreshRateTime);
 }
 
 template <typename T>
@@ -137,15 +141,65 @@ bool RealDevicePolicyProvider::ConvertRollbackToTargetVersion(
   int rollback_to_target_version_int;
   if (!policy_provider_->GetDevicePolicy().GetRollbackToTargetVersion(
           &rollback_to_target_version_int)) {
+    if (policy_provider_->IsEnterpriseEnrolledDevice() &&
+        policy_provider_->device_policy_is_loaded()) {
+      // Device is managed but Rollback policy is not set, clean tracking for
+      // any old Enterprise Rollback.
+      if (!oobe_config::CleanOutdatedTracking(*rollback_metrics_)) {
+        LOG(ERROR) << "Error cleaning up old Enterprise Rollback tracking.";
+      }
+    }
     return false;
   }
   if (rollback_to_target_version_int < 0 ||
       rollback_to_target_version_int >=
           static_cast<int>(RollbackToTargetVersion::kMaxValue)) {
+    if (!oobe_config::CleanOutdatedTracking(*rollback_metrics_)) {
+      LOG(ERROR) << "Error cleaning up old Enterprise Rollback tracking when "
+                    "wrong policy value is provided.";
+    }
     return false;
   }
+
   *rollback_to_target_version =
       static_cast<RollbackToTargetVersion>(rollback_to_target_version_int);
+
+  // Track Enterprise Rollback Metrics if the policy is enabled and we are
+  // preserving rollback data during powerwash. Clean old tracking otherwise.
+  switch (*rollback_to_target_version) {
+    case chromeos_update_manager::RollbackToTargetVersion::
+        kRollbackAndRestoreIfPossible: {
+      std::string target_version;
+      if (!policy_provider_->GetDevicePolicy().GetTargetVersionPrefix(
+              &target_version)) {
+        LOG(ERROR) << "Failed to read target version policy.";
+        break;
+      }
+
+      auto is_tracking_current_rollback =
+          oobe_config::IsTrackingForRollbackTargetVersion(*rollback_metrics_,
+                                                          target_version);
+      if (!is_tracking_current_rollback.has_value()) {
+        LOG(ERROR) << is_tracking_current_rollback.error();
+        if (!oobe_config::CleanOutdatedTracking(*rollback_metrics_)) {
+          LOG(ERROR) << "Error cleaning up old Enterprise Rollback tracking "
+                        "when error obtaining current tracking.";
+        }
+      } else if (!is_tracking_current_rollback.value()) {
+        if (!oobe_config::StartNewTracking(*rollback_metrics_,
+                                           target_version)) {
+          LOG(WARNING) << "Error starting new Enterprise Rollback tracking.";
+        }
+      }
+      break;
+    }
+    default:
+      if (!oobe_config::CleanOutdatedTracking(*rollback_metrics_)) {
+        LOG(ERROR) << "Error cleaning up old Enterprise Rollback metrics.";
+      }
+      break;
+  }
+
   return true;
 }
 
@@ -181,7 +235,7 @@ bool RealDevicePolicyProvider::ConvertScatterFactor(
                  << scatter_factor_in_seconds;
     return false;
   }
-  *scatter_factor = TimeDelta::FromSeconds(scatter_factor_in_seconds);
+  *scatter_factor = base::Seconds(scatter_factor_in_seconds);
   return true;
 }
 
@@ -255,6 +309,8 @@ void RealDevicePolicyProvider::RefreshDevicePolicy() {
 
   var_device_policy_is_loaded_.SetValue(
       policy_provider_->device_policy_is_loaded());
+  var_is_enterprise_enrolled_.SetValue(
+      policy_provider_->IsEnterpriseEnrolledDevice());
 
   UpdateVariable(&var_release_channel_, &DevicePolicy::GetReleaseChannel);
   UpdateVariable(&var_release_channel_delegated_,

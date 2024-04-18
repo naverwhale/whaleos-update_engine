@@ -24,8 +24,8 @@
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #if BASE_VER < 780000  // Android
 #include <base/message_loop/message_loop.h>
 #endif  // BASE_VER < 780000
@@ -125,17 +125,17 @@ class PostinstallRunnerActionTest : public ::testing::Test {
       // is ready by redirecting its input to /dev/zero.
       loop_.PostDelayedTask(
           FROM_HERE,
-          base::Bind(&PostinstallRunnerActionTest::SuspendRunningAction,
-                     base::Unretained(this)),
-          base::TimeDelta::FromMilliseconds(100));
+          base::BindOnce(&PostinstallRunnerActionTest::SuspendRunningAction,
+                         base::Unretained(this)),
+          base::Milliseconds(100));
     } else {
       postinstall_action_->SuspendAction();
       // Schedule to be resumed in a little bit.
       loop_.PostDelayedTask(
           FROM_HERE,
-          base::Bind(&PostinstallRunnerActionTest::ResumeRunningAction,
-                     base::Unretained(this)),
-          base::TimeDelta::FromMilliseconds(100));
+          base::BindOnce(&PostinstallRunnerActionTest::ResumeRunningAction,
+                         base::Unretained(this)),
+          base::Milliseconds(100));
     }
   }
 
@@ -144,19 +144,19 @@ class PostinstallRunnerActionTest : public ::testing::Test {
       // Wait for the postinstall command to run.
       loop_.PostDelayedTask(
           FROM_HERE,
-          base::Bind(&PostinstallRunnerActionTest::CancelWhenStarted,
-                     base::Unretained(this)),
-          base::TimeDelta::FromMilliseconds(10));
+          base::BindOnce(&PostinstallRunnerActionTest::CancelWhenStarted,
+                         base::Unretained(this)),
+          base::Milliseconds(10));
     } else {
       CHECK(processor_);
       // Must |PostDelayedTask()| here to be safe that |FileDescriptorWatcher|
       // doesn't leak memory, do not directly call |StopProcessing()|.
       loop_.PostDelayedTask(
           FROM_HERE,
-          base::Bind(
+          base::BindOnce(
               [](ActionProcessor* processor) { processor->StopProcessing(); },
               base::Unretained(processor_)),
-          base::TimeDelta::FromMilliseconds(100));
+          base::Milliseconds(100));
     }
   }
 
@@ -227,7 +227,7 @@ void PostinstallRunnerActionTest::RunPostinstallActionWithInstallPlan(
 
   loop_.PostTask(
       FROM_HERE,
-      base::Bind(
+      base::BindOnce(
           [](ActionProcessor* processor) { processor->StartProcessing(); },
           base::Unretained(&processor)));
   loop_.Run();
@@ -423,9 +423,10 @@ TEST_F(PostinstallRunnerActionTest, RunAsRootSuspendResumeActionTest) {
   ScopedLoopbackDeviceBinder loop(postinstall_image_, false, nullptr);
 
   // We need to wait for the child to run and setup its signal handler.
-  loop_.PostTask(FROM_HERE,
-                 base::Bind(&PostinstallRunnerActionTest::SuspendRunningAction,
-                            base::Unretained(this)));
+  loop_.PostTask(
+      FROM_HERE,
+      base::BindOnce(&PostinstallRunnerActionTest::SuspendRunningAction,
+                     base::Unretained(this)));
   RunPostinstallAction(loop.dev(), "bin/postinst_suspend", false, false, false);
   // postinst_suspend returns 0 only if it was suspended at some point.
   EXPECT_EQ(ErrorCode::kSuccess, processor_delegate_.code_);

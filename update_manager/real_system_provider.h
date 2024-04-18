@@ -68,6 +68,15 @@ class RealSystemProvider : public SystemProvider {
     return var_chromeos_version_.get();
   }
 
+  Variable<bool>* var_is_updating() override { return var_is_updating_.get(); }
+  Variable<bool>* var_is_resuming_from_hibernate() override {
+    return var_is_resuming_from_hibernate_.get();
+  }
+
+  Variable<bool>* var_abort_resume_from_hibernate() override {
+    return var_abort_resume_from_hibernate_.get();
+  }
+
  private:
   bool GetKioskAppRequiredPlatformVersion(
       std::string* required_platform_version);
@@ -78,6 +87,9 @@ class RealSystemProvider : public SystemProvider {
   std::unique_ptr<Variable<unsigned int>> var_num_slots_;
   std::unique_ptr<Variable<std::string>> var_kiosk_required_platform_version_;
   std::unique_ptr<Variable<base::Version>> var_chromeos_version_;
+  std::unique_ptr<Variable<bool>> var_is_updating_;
+  std::unique_ptr<Variable<bool>> var_is_resuming_from_hibernate_;
+  std::unique_ptr<Variable<bool>> var_abort_resume_from_hibernate_;
 
   org::chromium::KioskAppServiceInterfaceProxyInterface* const kiosk_app_proxy_;
 };

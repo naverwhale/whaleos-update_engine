@@ -100,9 +100,9 @@ class UmUpdateCheckAllowedPolicyTest : public UmPolicyTestBase {
     SetUpDefaultDevicePolicy();
     Time curr_time = next_update_check;
     if (allow_check)
-      curr_time += TimeDelta::FromSeconds(1);
+      curr_time += base::Seconds(1);
     else
-      curr_time -= TimeDelta::FromSeconds(1);
+      curr_time -= base::Seconds(1);
     fake_clock_->SetWallclockTime(curr_time);
   }
 
@@ -115,7 +115,7 @@ TEST_F(UmUpdateCheckAllowedPolicyTest, UpdateCheckAllowedWaitsForTheTimeout) {
   // case.
   Time next_update_check;
   Time last_checked_time =
-      fake_clock_->GetWallclockTime() + TimeDelta::FromMinutes(1234);
+      fake_clock_->GetWallclockTime() + base::Minutes(1234);
 
   fake_state_.updater_provider()->var_last_checked_time()->reset(
       new Time(last_checked_time));
@@ -128,7 +128,7 @@ TEST_F(UmUpdateCheckAllowedPolicyTest, UpdateCheckAllowedWaitsForTheTimeout) {
   SetUpDefaultState();
   fake_state_.updater_provider()->var_last_checked_time()->reset(
       new Time(last_checked_time));
-  fake_clock_->SetWallclockTime(next_update_check - TimeDelta::FromSeconds(1));
+  fake_clock_->SetWallclockTime(next_update_check - base::Seconds(1));
 
   EXPECT_EQ(EvalStatus::kAskMeAgainLater, evaluator_->Evaluate());
 
@@ -136,7 +136,7 @@ TEST_F(UmUpdateCheckAllowedPolicyTest, UpdateCheckAllowedWaitsForTheTimeout) {
   SetUpDefaultState();
   fake_state_.updater_provider()->var_last_checked_time()->reset(
       new Time(last_checked_time));
-  fake_clock_->SetWallclockTime(next_update_check + TimeDelta::FromSeconds(1));
+  fake_clock_->SetWallclockTime(next_update_check + base::Seconds(1));
   EXPECT_EQ(EvalStatus::kSucceeded, evaluator_->Evaluate());
   EXPECT_TRUE(uca_data_->update_check_params.updates_enabled);
   EXPECT_FALSE(uca_data_->update_check_params.interactive);
@@ -148,7 +148,7 @@ TEST_F(UmUpdateCheckAllowedPolicyTest, UpdateCheckAllowedWaitsForOOBE) {
   // Ensure that update is not allowed even if wait period is satisfied.
   Time next_update_check;
   Time last_checked_time =
-      fake_clock_->GetWallclockTime() + TimeDelta::FromMinutes(1234);
+      fake_clock_->GetWallclockTime() + base::Minutes(1234);
 
   fake_state_.updater_provider()->var_last_checked_time()->reset(
       new Time(last_checked_time));
@@ -160,7 +160,7 @@ TEST_F(UmUpdateCheckAllowedPolicyTest, UpdateCheckAllowedWaitsForOOBE) {
   SetUpDefaultState();
   fake_state_.updater_provider()->var_last_checked_time()->reset(
       new Time(last_checked_time));
-  fake_clock_->SetWallclockTime(next_update_check + TimeDelta::FromSeconds(1));
+  fake_clock_->SetWallclockTime(next_update_check + base::Seconds(1));
   fake_state_.system_provider()->var_is_oobe_complete()->reset(new bool(false));
 
   EXPECT_EQ(EvalStatus::kAskMeAgainLater, evaluator_->Evaluate());
@@ -170,7 +170,7 @@ TEST_F(UmUpdateCheckAllowedPolicyTest, UpdateCheckAllowedWaitsForOOBE) {
   SetUpDefaultState();
   fake_state_.updater_provider()->var_last_checked_time()->reset(
       new Time(last_checked_time));
-  fake_clock_->SetWallclockTime(next_update_check + TimeDelta::FromSeconds(1));
+  fake_clock_->SetWallclockTime(next_update_check + base::Seconds(1));
 
   EXPECT_EQ(EvalStatus::kSucceeded, evaluator_->Evaluate());
   EXPECT_TRUE(uca_data_->update_check_params.updates_enabled);
@@ -224,7 +224,7 @@ TEST_F(UmUpdateCheckAllowedPolicyTest, TestUpdateCheckIntervalTimeout) {
   // After moving the time forward more than the update check interval, it
   // should now allow for update.
   fake_clock_->SetWallclockTime(fake_clock_->GetWallclockTime() +
-                                TimeDelta::FromSeconds(11));
+                                base::Seconds(11));
   EXPECT_EQ(EvalStatus::kSucceeded, evaluator_->Evaluate());
 }
 
@@ -278,6 +278,57 @@ TEST_F(UmUpdateCheckAllowedPolicyTest,
   EXPECT_EQ(EvalStatus::kSucceeded, evaluator_->Evaluate());
   EXPECT_TRUE(uca_data_->update_check_params.updates_enabled);
   EXPECT_FALSE(uca_data_->update_check_params.interactive);
+}
+
+TEST_F(UmUpdateCheckAllowedPolicyTest, UpdateCheckAllowedConsumerEnabled) {
+  // Needed to allow next update check to pass the interval check.
+  SetUpdateCheckAllowed(true);
+  fake_state_.device_policy_provider()->var_device_policy_is_loaded()->reset(
+      new bool(false));
+  fake_state_.updater_provider()->var_consumer_auto_update_disabled()->reset(
+      new bool(false));
+
+  EXPECT_EQ(EvalStatus::kSucceeded, evaluator_->Evaluate());
+  EXPECT_TRUE(uca_data_->update_check_params.updates_enabled);
+  EXPECT_FALSE(uca_data_->update_check_params.interactive);
+}
+
+TEST_F(UmUpdateCheckAllowedPolicyTest, UpdateCheckAllowedConsumerDisabled) {
+  // Can be omitted, but allows that consumer update is actually what led to
+  // `kAskMeAgainLater`.
+  SetUpdateCheckAllowed(false);
+  fake_state_.device_policy_provider()->var_device_policy_is_loaded()->reset(
+      new bool(false));
+  fake_state_.updater_provider()->var_consumer_auto_update_disabled()->reset(
+      new bool(true));
+
+  EXPECT_EQ(EvalStatus::kAskMeAgainLater, evaluator_->Evaluate());
+  EXPECT_TRUE(uca_data_->update_check_params.updates_enabled);
+  EXPECT_FALSE(uca_data_->update_check_params.interactive);
+}
+
+TEST_F(UmUpdateCheckAllowedPolicyTest,
+       UpdateCheckAllowedInstallationsWhenBootedFromNonABSlots) {
+  // Even if there aren't enough slots, an installation should fall through.
+  // NOLINTNEXTLINE(readability/casting)
+  fake_state_.system_provider()->var_num_slots()->reset(new unsigned int(1));
+  fake_state_.system_provider()->var_is_updating()->reset(new bool(false));
+
+  EXPECT_EQ(EvalStatus::kSucceeded, evaluator_->Evaluate());
+  EXPECT_TRUE(uca_data_->update_check_params.updates_enabled);
+}
+
+TEST_F(UmUpdateCheckAllowedPolicyTest,
+       UpdateCheckAllowedInstallationsWhenEntDisablesUpdates) {
+  // Even if device policy blocks updates, an installation should fall through.
+  fake_state_.system_provider()->var_is_updating()->reset(new bool(false));
+
+  SetUpdateCheckAllowed(false);
+  fake_state_.device_policy_provider()->var_update_disabled()->reset(
+      new bool(true));
+
+  EXPECT_EQ(EvalStatus::kSucceeded, evaluator_->Evaluate());
+  EXPECT_TRUE(uca_data_->update_check_params.updates_enabled);
 }
 
 }  // namespace chromeos_update_manager

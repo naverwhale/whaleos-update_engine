@@ -20,8 +20,7 @@
 #include <memory>
 #include <unordered_set>
 
-#include <base/callback.h>
-#include <base/optional.h>
+#include <base/functional/callback.h>
 
 #include "update_engine/common/telemetry_info.h"
 
@@ -36,17 +35,17 @@ class CrosHealthdInterface {
 
   virtual ~CrosHealthdInterface() = default;
 
-  virtual bool Init() = 0;
-
+  // Returns the cached telemetry info from the last succeeded request.
+  // `nullptr` will be returned if no request has been sent or the last request
+  // failed.
   virtual TelemetryInfo* const GetTelemetryInfo() = 0;
 
-  // Returns telemetry information for the desired categories in callback.
-  // Limited to `TelemetryInfo` as the avaiable telemetry is vast.
-  using ProbeTelemetryInfoCallback =
-      base::OnceCallback<void(const TelemetryInfo&)>;
+  // Probes the telemetry info from cros_healthd and caches the results. Limited
+  // to `TelemetryInfo` as the avaiable telemetry is vast. `once_callback` will
+  // be called when the request is finished.
   virtual void ProbeTelemetryInfo(
       const std::unordered_set<TelemetryCategoryEnum>& categories,
-      ProbeTelemetryInfoCallback once_callback) = 0;
+      base::OnceClosure once_callback) = 0;
 
  protected:
   CrosHealthdInterface() = default;

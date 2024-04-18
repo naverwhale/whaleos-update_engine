@@ -18,7 +18,7 @@
 
 #include <memory>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <brillo/message_loops/fake_message_loop.h>
 #include <brillo/message_loops/message_loop.h>
 #include <brillo/message_loops/message_loop_utils.h>
@@ -121,8 +121,8 @@ TEST_F(UmCallCopyVariableTest, SimpleTest) {
   ASSERT_FALSE(test_obj.copied_);
   test_obj.val_ = 5;
 
-  base::Callback<CopyConstructorTestClass(void)> cb =
-      base::Bind(test_func, &test_obj);
+  base::RepeatingCallback<CopyConstructorTestClass(void)> cb =
+      base::BindRepeating(test_func, &test_obj);
   CallCopyVariable<CopyConstructorTestClass> var("var", cb);
 
   unique_ptr<const CopyConstructorTestClass> copy(
@@ -136,7 +136,7 @@ TEST_F(UmCallCopyVariableTest, SimpleTest) {
 TEST_F(UmCallCopyVariableTest, NullTest) {
   // Ensures that the variable returns null when the callback is null.
 
-  base::Callback<bool(void)> cb;
+  base::RepeatingCallback<bool(void)> cb;
   CallCopyVariable<bool> var("var", cb);
   UmTestUtils::ExpectVariableNotSet(&var);
 }

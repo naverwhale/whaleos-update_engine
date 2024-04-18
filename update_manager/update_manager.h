@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <base/memory/weak_ptr.h>
 #include <base/time/time.h>
 
@@ -70,7 +70,7 @@ class UpdateManager {
   // with the EvalStatus::kAskMeAgainLater status (which indicates an error).
   void PolicyRequest(std::unique_ptr<PolicyInterface> policy,
                      std::shared_ptr<PolicyDataInterface> data,
-                     base::Callback<void(EvalStatus)> callback);
+                     base::OnceCallback<void(EvalStatus)> callback);
 
   // Removes the |evaluator| from the internal list of |evaluators_|.
   void Unregister(PolicyEvaluator* evaluator);

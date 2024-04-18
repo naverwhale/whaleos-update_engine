@@ -42,22 +42,21 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_enumerator.h>
 #include <base/files/file_path.h>
 #include <base/format_macros.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 
+#include "update_engine/common/call_wrapper.h"
 #include "update_engine/common/subprocess.h"
 #include "update_engine/common/system_state.h"
 #include "update_engine/common/utils.h"
 #include "update_engine/update_manager/p2p_enabled_policy.h"
 #include "update_engine/update_manager/update_manager.h"
 
-using base::Bind;
-using base::Callback;
 using base::FilePath;
 using base::StringPrintf;
 using base::Time;
@@ -374,7 +373,7 @@ bool P2PManagerImpl::PerformHousekeeping() {
 class LookupData {
  public:
   explicit LookupData(P2PManager::LookupCallback callback)
-      : callback_(callback) {}
+      : callback_(std::move(callback)) {}
 
   ~LookupData() {
     if (timeout_task_ != MessageLoop::kTaskIdNull)
@@ -394,7 +393,7 @@ class LookupData {
         cmd,
         Subprocess::kSearchPath,
         {},
-        Bind(&LookupData::OnLookupDone, base::Unretained(this)));
+        base::BindOnce(&LookupData::OnLookupDone, base::Unretained(this)));
 
     if (!child_pid_) {
       LOG(ERROR) << "Error spawning " << utils::StringVectorToString(cmd);
@@ -405,7 +404,7 @@ class LookupData {
     if (timeout > TimeDelta()) {
       timeout_task_ = MessageLoop::current()->PostDelayedTask(
           FROM_HERE,
-          Bind(&LookupData::OnTimeout, base::Unretained(this)),
+          base::BindOnce(&LookupData::OnTimeout, base::Unretained(this)),
           timeout);
     }
   }
@@ -414,8 +413,8 @@ class LookupData {
   void ReportErrorAndDeleteInIdle() {
     MessageLoop::current()->PostTask(
         FROM_HERE,
-        Bind(&LookupData::OnIdleForReportErrorAndDelete,
-             base::Unretained(this)));
+        base::BindOnce(&LookupData::OnIdleForReportErrorAndDelete,
+                       base::Unretained(this)));
   }
 
   void OnIdleForReportErrorAndDelete() {
@@ -425,7 +424,7 @@ class LookupData {
 
   void IssueCallback(const string& url) {
     if (!callback_.is_null())
-      callback_.Run(url);
+      std::move(callback_).Run(url);
   }
 
   void ReportError() {
@@ -488,7 +487,7 @@ void P2PManagerImpl::LookupUrlForFile(const string& file_id,
                                       size_t minimum_size,
                                       TimeDelta max_time_to_wait,
                                       LookupCallback callback) {
-  LookupData* lookup_data = new LookupData(callback);
+  LookupData* lookup_data = new LookupData(std::move(callback));
   string file_id_with_ext = file_id + "." + file_extension_;
   vector<string> args =
       configuration_->GetP2PClientArgs(file_id_with_ext, minimum_size);
@@ -514,15 +513,16 @@ bool P2PManagerImpl::FileShare(const string& file_id, size_t expected_size) {
 
   // Before creating the file, bail if statvfs(3) indicates that at
   // least twice the size is not available in P2P_DIR.
-  struct statvfs statvfsbuf;
   FilePath p2p_dir = configuration_->GetP2PDir();
-  if (statvfs(p2p_dir.value().c_str(), &statvfsbuf) != 0) {
-    PLOG(ERROR) << "Error calling statvfs() for dir " << p2p_dir.value();
+  int64_t free_bytes =
+      SystemState::Get()->call_wrapper()->AmountOfFreeDiskSpace(p2p_dir);
+  if (free_bytes < 0) {
+    PLOG(ERROR) << "Error getting amount of free disk space from "
+                << p2p_dir.value();
     return false;
   }
-  size_t free_bytes =
-      static_cast<size_t>(statvfsbuf.f_bsize) * statvfsbuf.f_bavail;
-  if (free_bytes < 2 * expected_size) {
+  // Compare sizes this way to handle overflows.
+  if (free_bytes / 2 < expected_size) {
     // This can easily happen and is worth reporting.
     LOG(INFO) << "Refusing to allocate p2p file of " << expected_size
               << " bytes since the directory " << p2p_dir.value()
@@ -694,7 +694,8 @@ void P2PManagerImpl::ScheduleEnabledStatusChange() {
   update_manager_->PolicyRequest(
       std::make_unique<P2PEnabledChangedPolicy>(),
       policy_data_,
-      Bind(&P2PManagerImpl::OnEnabledStatusChange, base::Unretained(this)));
+      base::BindOnce(&P2PManagerImpl::OnEnabledStatusChange,
+                     base::Unretained(this)));
   waiting_for_enabled_status_change_ = true;
 }
 

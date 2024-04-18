@@ -27,9 +27,9 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/callback.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
 #include <base/test/simple_test_clock.h>
 #include <brillo/message_loops/fake_message_loop.h>
@@ -49,6 +49,7 @@
 #include <policy/libpolicy.h>
 #include <policy/mock_device_policy.h>
 
+#include "update_engine/common/mock_call_wrapper.h"
 #include "update_engine/common/prefs.h"
 #include "update_engine/common/subprocess.h"
 #include "update_engine/common/test_utils.h"
@@ -79,10 +80,11 @@ class P2PManagerSimpleTest : public testing::Test {
     FakeSystemState::CreateInstance();
     test_conf_ = new FakeP2PManagerConfiguration();
     fake_um_ = FakeSystemState::Get()->fake_update_manager();
+    mock_call_wrapper_ = FakeSystemState::Get()->mock_call_wrapper();
 
     // Construct the P2P manager under test.
     manager_.reset(P2PManager::Construct(
-        test_conf_, fake_um_, "cros_au", 3, TimeDelta::FromDays(5)));
+        test_conf_, fake_um_, "cros_au", 3, base::Days(5)));
   }
 
   base::SimpleTestClock test_clock_;
@@ -94,6 +96,8 @@ class P2PManagerSimpleTest : public testing::Test {
   chromeos_update_manager::FakeUpdateManager* fake_um_;
 
   unique_ptr<P2PManager> manager_;
+
+  MockCallWrapper* mock_call_wrapper_;
 };
 
 // Check that |IsP2PEnabled()| polls the policy correctly, with the value not
@@ -107,7 +111,7 @@ TEST_F(P2PManagerSimpleTest, P2PEnabledInitAndNotChangedAndChanged) {
   brillo::MessageLoopRunMaxIterations(MessageLoop::current(), 100);
 
   // Move clock a few minutes so the timeout causes the policy be re-evaluated.
-  test_clock_.Advance(TimeDelta::FromMinutes(6));
+  test_clock_.Advance(base::Minutes(6));
 
   fake_um_->state()->updater_provider()->var_p2p_enabled()->reset(
       new bool(true));
@@ -161,7 +165,7 @@ TEST_F(P2PManagerTest, HousekeepingCountLimit) {
   for (int n = 0; n < 5; n++) {
     base::FilePath path = test_conf_->GetP2PDir().Append(
         base::StringPrintf("file_%d.cros_au.p2p", n));
-    base::Time file_time = start_time + TimeDelta::FromMinutes(n);
+    base::Time file_time = start_time + base::Minutes(n);
     EXPECT_EQ(0, base::WriteFile(path, nullptr, 0));
     EXPECT_TRUE(base::TouchFile(path, file_time, file_time));
 
@@ -202,7 +206,7 @@ TEST_F(P2PManagerTest, HousekeepingAgeLimit) {
   // flakiness) since the epoch and then we put two files before that
   // date and three files after.
   base::Time cutoff_time = base::Time::FromTimeT(1000000000);
-  TimeDelta age_limit = TimeDelta::FromDays(5);
+  TimeDelta age_limit = base::Days(5);
 
   // Set the clock just so files with a timestamp before |cutoff_time|
   // will be deleted at housekeeping.
@@ -230,8 +234,8 @@ TEST_F(P2PManagerTest, HousekeepingAgeLimit) {
     //                            |
     //                       cutoff_time
     //
-    base::Time file_date = cutoff_time + (n - 2) * TimeDelta::FromDays(1) +
-                           TimeDelta::FromHours(12);
+    base::Time file_date =
+        cutoff_time + (n - 2) * base::Days(1) + base::Hours(12);
 
     EXPECT_EQ(0, base::WriteFile(path, nullptr, 0));
     EXPECT_TRUE(base::TouchFile(path, file_date, file_date));
@@ -357,6 +361,8 @@ static bool CreateP2PFile(string p2p_dir,
 // Check that sharing a *new* file works.
 TEST_F(P2PManagerTest, ShareFile) {
   const int kP2PTestFileSize = 1000 * 8;  // 8 KB
+  EXPECT_CALL(*mock_call_wrapper_, AmountOfFreeDiskSpace(_))
+      .WillOnce(Return(kP2PTestFileSize * 2));
 
   EXPECT_TRUE(manager_->FileShare("foo", kP2PTestFileSize));
   EXPECT_EQ(manager_->FileGetPath("foo"),
@@ -376,6 +382,8 @@ TEST_F(P2PManagerTest, ShareFile) {
 // Check that making a shared file visible, does what is expected.
 TEST_F(P2PManagerTest, MakeFileVisible) {
   const int kP2PTestFileSize = 1000 * 8;  // 8 KB
+  EXPECT_CALL(*mock_call_wrapper_, AmountOfFreeDiskSpace(_))
+      .WillOnce(Return(kP2PTestFileSize * 2));
 
   // First, check that it's not visible.
   manager_->FileShare("foo", kP2PTestFileSize);
@@ -396,6 +404,20 @@ TEST_F(P2PManagerTest, MakeFileVisible) {
                              0,
                              kP2PTestFileSize));
   }
+}
+
+TEST_F(P2PManagerTest, SharingFileBytesMoreThanNecessaryStorageSpace) {
+  const int kP2PTestFileSize = 16 * (1 << 10);  // 16 KB
+  EXPECT_CALL(*mock_call_wrapper_, AmountOfFreeDiskSpace(_))
+      .WillOnce(Return(kP2PTestFileSize + 1));
+  EXPECT_FALSE(manager_->FileShare("foo", kP2PTestFileSize));
+}
+
+TEST_F(P2PManagerTest, SharingFileBytesLessThanNecessaryStorageSpace) {
+  const int kP2PTestFileSize = 16 * (1 << 10);  // 16 KB
+  EXPECT_CALL(*mock_call_wrapper_, AmountOfFreeDiskSpace(_))
+      .WillOnce(Return(kP2PTestFileSize * 2));
+  EXPECT_TRUE(manager_->FileShare("foo", kP2PTestFileSize));
 }
 
 // Check that we return the right values for existing files in P2P_DIR.
@@ -483,31 +505,31 @@ TEST_F(P2PManagerTest, LookupURL) {
       "fooX",
       42,
       TimeDelta(),
-      base::Bind(ExpectUrl, "http://1.2.3.4/fooX.cros_au_42"));
+      base::BindOnce(ExpectUrl, "http://1.2.3.4/fooX.cros_au_42"));
   loop_.Run();
 
   // Emulate p2p-client returning invalid URL.
   test_conf_->SetP2PClientCommand({"echo", "not_a_valid_url"});
   manager_->LookupUrlForFile(
-      "foobar", 42, TimeDelta(), base::Bind(ExpectUrl, ""));
+      "foobar", 42, TimeDelta(), base::BindOnce(ExpectUrl, ""));
   loop_.Run();
 
   // Emulate p2p-client conveying failure.
   test_conf_->SetP2PClientCommand({"false"});
   manager_->LookupUrlForFile(
-      "foobar", 42, TimeDelta(), base::Bind(ExpectUrl, ""));
+      "foobar", 42, TimeDelta(), base::BindOnce(ExpectUrl, ""));
   loop_.Run();
 
   // Emulate p2p-client not existing.
   test_conf_->SetP2PClientCommand({"/path/to/non/existent/helper/program"});
   manager_->LookupUrlForFile(
-      "foobar", 42, TimeDelta(), base::Bind(ExpectUrl, ""));
+      "foobar", 42, TimeDelta(), base::BindOnce(ExpectUrl, ""));
   loop_.Run();
 
   // Emulate p2p-client crashing.
   test_conf_->SetP2PClientCommand({"sh", "-c", "kill -SEGV $$"});
   manager_->LookupUrlForFile(
-      "foobar", 42, TimeDelta(), base::Bind(ExpectUrl, ""));
+      "foobar", 42, TimeDelta(), base::BindOnce(ExpectUrl, ""));
   loop_.Run();
 
   // Emulate p2p-client exceeding its timeout.
@@ -524,10 +546,8 @@ TEST_F(P2PManagerTest, LookupURL) {
        "sleep_pid=$!; "
        "echo http://1.2.3.4/; "
        "wait"});
-  manager_->LookupUrlForFile("foobar",
-                             42,
-                             TimeDelta::FromMilliseconds(500),
-                             base::Bind(ExpectUrl, ""));
+  manager_->LookupUrlForFile(
+      "foobar", 42, base::Milliseconds(500), base::BindOnce(ExpectUrl, ""));
   loop_.Run();
 }
 

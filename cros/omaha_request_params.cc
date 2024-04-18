@@ -20,18 +20,20 @@
 #include <fcntl.h>
 #include <sys/utsname.h>
 
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
 
 #include <base/files/file_util.h>
 #include <base/logging.h>
-#include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
+#include <base/version.h>
 #include <brillo/key_value_store.h>
 #include <brillo/strings/string_utils.h>
 #include <policy/device_policy.h>
+#include <re2/re2.h>
 
 #include "update_engine/common/boot_control_interface.h"
 #include "update_engine/common/constants.h"
@@ -50,11 +52,28 @@ namespace chromeos_update_engine {
 namespace {
 const char* kChannelsByStability[] = {
     // This list has to be sorted from least stable to most stable channel.
-    "canary-channel",
-    "dev-channel",
-    "beta-channel",
-    "stable-channel",
+    kCanaryChannel,
+    kDevChannel,
+    kBetaChannel,
+    kStableChannel,
+    kLtcChannel,
+    kLtsChannel,
 };
+
+// Activate date should be the output of date --utc "+%Y-%W".
+bool IsValidActivateDate(const std::string& activate_date_from_vpd) {
+  unsigned int week_number;
+  if (!RE2::FullMatch(
+          activate_date_from_vpd, "\\d{4}-(\\d{2})", &week_number)) {
+    return false;
+  }
+  return week_number < 54;
+}
+
+bool IsValidFsiVersion(const std::string& fsi_version_from_vpd) {
+  return base::Version(fsi_version_from_vpd).IsValid();
+}
+
 }  // namespace
 
 constexpr char OmahaRequestParams::kOsVersion[] = "Indy";
@@ -75,7 +94,7 @@ bool OmahaRequestParams::Init(const string& app_version,
 
   // Validation check the channel names.
   if (!IsValidChannel(image_props_.current_channel))
-    image_props_.current_channel = "stable-channel";
+    image_props_.current_channel = kStableChannel;
   if (!IsValidChannel(mutable_image_props_.target_channel))
     mutable_image_props_.target_channel = image_props_.current_channel;
   UpdateDownloadChannel();
@@ -160,6 +179,27 @@ bool OmahaRequestParams::Init(const string& app_version,
   rollback_allowed_ = false;
   rollback_data_save_requested_ = false;
   rollback_allowed_milestones_ = 0;
+
+  const auto& fsi_version_from_vpd =
+      SystemState::Get()->hardware()->GetFsiVersion();
+
+  if (IsValidFsiVersion(fsi_version_from_vpd)) {
+    fsi_version_ = fsi_version_from_vpd;
+    activate_date_ = "";
+  } else {
+    LOG(ERROR) << "None or invalid fsi version in vpd, value: "
+               << fsi_version_from_vpd;
+    fsi_version_ = "";
+    const auto& activate_date_from_vpd =
+        SystemState::Get()->hardware()->GetActivateDate();
+    if (IsValidActivateDate(activate_date_from_vpd)) {
+      activate_date_ = activate_date_from_vpd;
+    } else {
+      activate_date_ = "";
+      LOG(ERROR) << "None or invalid activate date in vpd, value: "
+                 << activate_date_from_vpd;
+    }
+  }
 
   // Set the target channel, if one was provided.
   if (params.target_channel.empty()) {
@@ -259,13 +299,18 @@ bool OmahaRequestParams::IsValidChannel(const string& channel,
   return true;
 }
 
+// static
+bool OmahaRequestParams::IsCommercialChannel(const string& channel) {
+  return channel == kLtcChannel || channel == kLtsChannel;
+}
+
 void OmahaRequestParams::set_root(const string& root) {
   root_ = root;
   test::SetImagePropertiesRootPrefix(root_.c_str());
 }
 
 int OmahaRequestParams::GetChannelIndex(const string& channel) const {
-  for (size_t t = 0; t < base::size(kChannelsByStability); ++t)
+  for (size_t t = 0; t < std::size(kChannelsByStability); ++t)
     if (channel == kChannelsByStability[t])
       return t;
 
@@ -291,8 +336,8 @@ bool OmahaRequestParams::ShouldPowerwash() const {
 }
 
 string OmahaRequestParams::GetAppId() const {
-  return download_channel_ == "canary-channel" ? image_props_.canary_product_id
-                                               : image_props_.product_id;
+  return download_channel_ == kCanaryChannel ? image_props_.canary_product_id
+                                             : image_props_.product_id;
 }
 
 string OmahaRequestParams::GetDlcAppId(const std::string& dlc_id) const {

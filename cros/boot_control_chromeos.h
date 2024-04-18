@@ -20,7 +20,7 @@
 #include <memory>
 #include <string>
 
-#include <base/callback.h>
+#include <base/functional/callback.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 #include "update_engine/common/boot_control_interface.h"
@@ -50,6 +50,8 @@ class BootControlChromeOS : public BootControlInterface {
   // BootControlInterface overrides.
   unsigned int GetNumSlots() const override;
   BootControlInterface::Slot GetCurrentSlot() const override;
+  BootControlInterface::Slot GetFirstInactiveSlot() const override;
+  base::FilePath GetBootDevicePath() const override;
   bool GetPartitionDevice(const std::string& partition_name,
                           BootControlInterface::Slot slot,
                           bool not_in_payload,
@@ -58,11 +60,16 @@ class BootControlChromeOS : public BootControlInterface {
   bool GetPartitionDevice(const std::string& partition_name,
                           BootControlInterface::Slot slot,
                           std::string* device) const override;
+  bool GetErrorCounter(BootControlInterface::Slot slot,
+                       int* error_counter) const override;
+  bool SetErrorCounter(BootControlInterface::Slot slot,
+                       int error_counter) override;
   bool IsSlotBootable(BootControlInterface::Slot slot) const override;
   bool MarkSlotUnbootable(BootControlInterface::Slot slot) override;
   bool SetActiveBootSlot(BootControlInterface::Slot slot) override;
   bool MarkBootSuccessful() override;
-  bool MarkBootSuccessfulAsync(base::Callback<void(bool)> callback) override;
+  bool MarkBootSuccessfulAsync(
+      base::OnceCallback<void(bool)> callback) override;
   bool IsSlotMarkedSuccessful(BootControlInterface::Slot slot) const override;
   DynamicPartitionControlInterface* GetDynamicPartitionControl() override;
   bool GetMiniOSKernelConfig(std::string* configs) override;
@@ -70,12 +77,15 @@ class BootControlChromeOS : public BootControlInterface {
                         std::string* value) override;
   std::string GetMiniOSPartitionName() override;
   bool SupportsMiniOSPartitions() override;
+  bool IsLvmStackEnabled(brillo::LogicalVolumeManager* lvm) override;
 
  private:
   friend class BootControlChromeOSTest;
+  FRIEND_TEST(BootControlChromeOSTest, GetFirstInactiveSlot);
   FRIEND_TEST(BootControlChromeOSTest, SysfsBlockDeviceTest);
   FRIEND_TEST(BootControlChromeOSTest, GetPartitionNumberTest);
   FRIEND_TEST(BootControlChromeOSTest, ParseDlcPartitionNameTest);
+  FRIEND_TEST(BootControlChromeOSTest, IsLvmStackEnabledTest);
 
   // Returns the sysfs block device for a root block device. For example,
   // SysfsBlockDevice("/dev/sda") returns "/sys/block/sda". Returns an empty
@@ -104,6 +114,9 @@ class BootControlChromeOS : public BootControlInterface {
 
   // The block device of the disk we booted from, without the partition number.
   std::string boot_disk_name_;
+
+  // Cached value for LVM stack enablement check.
+  std::optional<bool> is_lvm_stack_enabled_;
 
   std::unique_ptr<DynamicPartitionControlInterface> dynamic_partition_control_;
 };

@@ -64,27 +64,6 @@ class UpdateEngineServiceTest : public ::testing::Test {
   UpdateEngineService common_service_;
 };
 
-TEST_F(UpdateEngineServiceTest, AttemptUpdate) {
-  UpdateParams update_params;
-  update_params.set_app_version("app_ver");
-  update_params.set_omaha_url("url");
-  update_params.mutable_update_flags()->set_non_interactive(true);
-  EXPECT_CALL(*mock_update_attempter_,
-              CheckForUpdate(EqualsProto(update_params)))
-      .WillOnce(Return(true));
-
-  // The non-interactive flag needs to be passed through to CheckForUpdate.
-  bool result = false;
-  EXPECT_TRUE(
-      common_service_.AttemptUpdate(&error_,
-                                    "app_ver",
-                                    "url",
-                                    UpdateAttemptFlags::kFlagNonInteractive,
-                                    &result));
-  EXPECT_EQ(nullptr, error_);
-  EXPECT_TRUE(result);
-}
-
 TEST_F(UpdateEngineServiceTest, Update) {
   UpdateParams update_params;
   update_params.set_app_version("app_ver");
@@ -99,21 +78,6 @@ TEST_F(UpdateEngineServiceTest, Update) {
   EXPECT_TRUE(common_service_.Update(&error_, update_params, &result));
   EXPECT_EQ(nullptr, error_);
   EXPECT_TRUE(result);
-}
-
-TEST_F(UpdateEngineServiceTest, AttemptUpdateReturnsFalse) {
-  UpdateParams update_params;
-  update_params.set_app_version("app_ver");
-  update_params.set_omaha_url("url");
-  update_params.mutable_update_flags()->set_non_interactive(false);
-  EXPECT_CALL(*mock_update_attempter_,
-              CheckForUpdate(EqualsProto(update_params)))
-      .WillOnce(Return(false));
-  bool result = true;
-  EXPECT_TRUE(common_service_.AttemptUpdate(
-      &error_, "app_ver", "url", UpdateAttemptFlags::kNone, &result));
-  EXPECT_EQ(nullptr, error_);
-  EXPECT_FALSE(result);
 }
 
 TEST_F(UpdateEngineServiceTest, UpdateReturnsFalse) {
@@ -131,7 +95,7 @@ TEST_F(UpdateEngineServiceTest, UpdateReturnsFalse) {
 }
 
 TEST_F(UpdateEngineServiceTest, AttemptInstall) {
-  EXPECT_CALL(*mock_update_attempter_, CheckForInstall(_, _))
+  EXPECT_CALL(*mock_update_attempter_, CheckForInstall(_, _, _))
       .WillOnce(Return(true));
 
   EXPECT_TRUE(common_service_.AttemptInstall(&error_, "", {}));
@@ -139,7 +103,7 @@ TEST_F(UpdateEngineServiceTest, AttemptInstall) {
 }
 
 TEST_F(UpdateEngineServiceTest, AttemptInstallReturnsFalse) {
-  EXPECT_CALL(*mock_update_attempter_, CheckForInstall(_, _))
+  EXPECT_CALL(*mock_update_attempter_, CheckForInstall(_, _, _))
       .WillOnce(Return(false));
 
   EXPECT_FALSE(common_service_.AttemptInstall(&error_, "", {}));
@@ -165,9 +129,9 @@ TEST_F(UpdateEngineServiceTest, SetChannelWithNoPolicy) {
   EXPECT_CALL(*mock_update_attempter_, RefreshDevicePolicy());
   // If SetTargetChannel is called it means the policy check passed.
   EXPECT_CALL(*FakeSystemState::Get()->mock_request_params(),
-              SetTargetChannel("stable-channel", true, _))
+              SetTargetChannel(kStableChannel, true, _))
       .WillOnce(Return(true));
-  EXPECT_TRUE(common_service_.SetChannel(&error_, "stable-channel", true));
+  EXPECT_TRUE(common_service_.SetChannel(&error_, kStableChannel, true));
   ASSERT_EQ(nullptr, error_);
 }
 
@@ -178,10 +142,10 @@ TEST_F(UpdateEngineServiceTest, SetChannelWithDelegatedPolicy) {
   EXPECT_CALL(mock_device_policy, GetReleaseChannelDelegated(_))
       .WillOnce(DoAll(SetArgPointee<0>(true), Return(true)));
   EXPECT_CALL(*FakeSystemState::Get()->mock_request_params(),
-              SetTargetChannel("beta-channel", true, _))
+              SetTargetChannel(kBetaChannel, true, _))
       .WillOnce(Return(true));
 
-  EXPECT_TRUE(common_service_.SetChannel(&error_, "beta-channel", true));
+  EXPECT_TRUE(common_service_.SetChannel(&error_, kBetaChannel, true));
   ASSERT_EQ(nullptr, error_);
 }
 
@@ -194,6 +158,26 @@ TEST_F(UpdateEngineServiceTest, SetChannelWithInvalidChannel) {
       .WillOnce(Return(false));
 
   EXPECT_FALSE(common_service_.SetChannel(&error_, "foo-channel", true));
+  ASSERT_NE(nullptr, error_);
+  EXPECT_TRUE(error_->HasError(UpdateEngineService::kErrorDomain,
+                               UpdateEngineService::kErrorFailed));
+}
+
+// When passing lts channel, an error should be raised.
+TEST_F(UpdateEngineServiceTest, SetChannelWithCommercialChannelLts) {
+  EXPECT_CALL(*mock_update_attempter_, RefreshDevicePolicy());
+
+  EXPECT_FALSE(common_service_.SetChannel(&error_, kLtsChannel, true));
+  ASSERT_NE(nullptr, error_);
+  EXPECT_TRUE(error_->HasError(UpdateEngineService::kErrorDomain,
+                               UpdateEngineService::kErrorFailed));
+}
+
+// When passing ltc only channel, an error should be raised.
+TEST_F(UpdateEngineServiceTest, SetChannelWithCommercialChannelLtc) {
+  EXPECT_CALL(*mock_update_attempter_, RefreshDevicePolicy());
+
+  EXPECT_FALSE(common_service_.SetChannel(&error_, kLtcChannel, true));
   ASSERT_NE(nullptr, error_);
   EXPECT_TRUE(error_->HasError(UpdateEngineService::kErrorDomain,
                                UpdateEngineService::kErrorFailed));

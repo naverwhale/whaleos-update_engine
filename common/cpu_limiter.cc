@@ -18,7 +18,7 @@
 
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/time/time.h>
@@ -47,8 +47,8 @@ void CPULimiter::StartLimiter() {
   }
   manage_shares_id_ = brillo::MessageLoop::current()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&CPULimiter::StopLimiterCallback, base::Unretained(this)),
-      base::TimeDelta::FromHours(2));
+      base::BindOnce(&CPULimiter::StopLimiterCallback, base::Unretained(this)),
+      base::Hours(2));
   SetCpuShares(CpuShares::kLow);
 }
 

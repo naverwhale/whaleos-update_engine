@@ -23,76 +23,78 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include <dbus/object_proxy.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
+#include <diagnostics/mojom/public/cros_healthd.mojom.h>
+#include <diagnostics/mojom/public/cros_healthd_probe.mojom.h>
 #include <mojo/core/embedder/embedder.h>
 #include <mojo/core/embedder/scoped_ipc_support.h>
-
-#include "diagnostics/cros_healthd_mojo_adapter/cros_healthd_mojo_adapter.h"
-#include "mojo/cros_healthd_probe.mojom.h"
+#include <mojo/public/cpp/bindings/remote.h>
+#include <mojo_service_manager/lib/mojom/service_manager.mojom.h>
 
 namespace chromeos_update_engine {
 
 class CrosHealthd : public CrosHealthdInterface {
  public:
-  CrosHealthd()
-      : telemetry_info_(std::make_unique<TelemetryInfo>()),
-        weak_ptr_factory_(this) {}
+  CrosHealthd() = default;
   CrosHealthd(const CrosHealthd&) = delete;
   CrosHealthd& operator=(const CrosHealthd&) = delete;
 
   ~CrosHealthd() = default;
 
+  // Bootstraps the mojo services. This can only be done once in each process.
+  void BootstrapMojo();
+
   // CrosHealthdInterface overrides.
-  bool Init() override;
   TelemetryInfo* const GetTelemetryInfo() override;
   void ProbeTelemetryInfo(
       const std::unordered_set<TelemetryCategoryEnum>& categories,
-      ProbeTelemetryInfoCallback once_callback) override;
+      base::OnceClosure once_callback) override;
 
  private:
-  FRIEND_TEST(CrosHealthdTest, ParseSystemResultV2Check);
+  FRIEND_TEST(CrosHealthdTest, ParseSystemResultCheck);
   FRIEND_TEST(CrosHealthdTest, ParseMemoryResultCheck);
   FRIEND_TEST(CrosHealthdTest, ParseNonRemovableBlockDeviceResultCheck);
   FRIEND_TEST(CrosHealthdTest, ParseCpuResultCheck);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckMissingBusResult);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckMissingBusInfo);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckPciBusDefault);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckPciBus);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckUsbBusDefault);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckUsbBus);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckThunderboltBusDefault);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckThunderboltBus);
+  FRIEND_TEST(CrosHealthdTest, ParseBusResultCheckAllBus);
 
-  // Get `cros_healthd` DBus object proxy.
-  dbus::ObjectProxy* GetCrosHealthdObjectProxy();
-
-  // Bootstraps connection to `cros_healthd` mojo from DBus.
-  bool BootstrapMojo();
-
-  void OnProbeTelemetryInfo(
-      ProbeTelemetryInfoCallback once_callback,
-      chromeos::cros_healthd::mojom::TelemetryInfoPtr result);
+  void OnProbeTelemetryInfo(base::OnceClosure once_callback,
+                            ash::cros_healthd::mojom::TelemetryInfoPtr result);
 
   // Parsing helpers for `OnProbTelemetryInfo()` .
-  bool ParseSystemResultV2(
-      chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
+  static bool ParseSystemResult(
+      ash::cros_healthd::mojom::TelemetryInfoPtr* result,
       TelemetryInfo* telemetry_info);
-  bool ParseMemoryResult(
-      chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
+  static bool ParseMemoryResult(
+      ash::cros_healthd::mojom::TelemetryInfoPtr* result,
       TelemetryInfo* telemetry_info);
-  bool ParseNonRemovableBlockDeviceResult(
-      chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
+  static bool ParseNonRemovableBlockDeviceResult(
+      ash::cros_healthd::mojom::TelemetryInfoPtr* result,
       TelemetryInfo* telemetry_info);
-  bool ParseCpuResult(chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
-                      TelemetryInfo* telemetry_info);
-  bool ParseBusResult(chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
-                      TelemetryInfo* telemetry_info);
+  static bool ParseCpuResult(ash::cros_healthd::mojom::TelemetryInfoPtr* result,
+                             TelemetryInfo* telemetry_info);
+  static bool ParseBusResult(ash::cros_healthd::mojom::TelemetryInfoPtr* result,
+                             TelemetryInfo* telemetry_info);
 
   std::unique_ptr<TelemetryInfo> telemetry_info_;
 
   std::unique_ptr<mojo::core::ScopedIPCSupport> ipc_support_;
 
-  mojo::Remote<chromeos::cros_healthd::mojom::CrosHealthdServiceFactory>
-      cros_healthd_service_factory_;
+  mojo::Remote<chromeos::mojo_service_manager::mojom::ServiceManager>
+      service_manager_;
 
-  mojo::Remote<chromeos::cros_healthd::mojom::CrosHealthdProbeService>
+  mojo::Remote<ash::cros_healthd::mojom::CrosHealthdProbeService>
       cros_healthd_probe_service_;
 
-  base::WeakPtrFactory<CrosHealthd> weak_ptr_factory_;
+  base::WeakPtrFactory<CrosHealthd> weak_ptr_factory_{this};
 };
 
 }  // namespace chromeos_update_engine

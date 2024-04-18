@@ -20,7 +20,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <brillo/secure_blob.h>
 
 #include "update_engine/client_library/include/update_engine/update_status.h"
@@ -39,9 +38,14 @@ enum class InstallPayloadType {
 
 std::string InstallPayloadTypeToString(InstallPayloadType type);
 
-struct InstallPlan {
-  InstallPlan() = default;
+enum class DeferUpdateAction {
+  kOff,
+  kHold,
+  kApplyAndReboot,
+  kApplyAndShutdown,
+};
 
+struct InstallPlan {
   bool operator==(const InstallPlan& that) const;
   bool operator!=(const InstallPlan& that) const;
 
@@ -183,6 +187,9 @@ struct InstallPlan {
   // Indicates the type of update.
   update_engine::UpdateUrgencyInternal update_urgency{
       update_engine::UpdateUrgencyInternal::REGULAR};
+
+  // The defer update action to perform during post installation.
+  DeferUpdateAction defer_update_action{DeferUpdateAction::kOff};
 };
 
 class InstallPlanAction;

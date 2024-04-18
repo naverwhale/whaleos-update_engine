@@ -14,16 +14,13 @@
   See the License for the specific language governing permissions and
   limitations under the License.
 !-->
-<node name="/org/chromium/UpdateEngine">
+<node name="/org/chromium/UpdateEngine"
+      xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
   <interface name="org.chromium.UpdateEngineInterface">
     <annotation name="org.freedesktop.DBus.GLib.CSymbol"
                 value="update_engine_service" />
     <annotation name="org.freedesktop.DBus.GLib.ClientCSymbol"
                 value="update_engine_client" />
-    <method name="AttemptUpdate">
-      <arg type="s" name="app_version" direction="in" />
-      <arg type="s" name="omaha_url" direction="in" />
-    </method>
     <method name="Update">
       <arg type="ay" name="update_params" direction="in">
         <tp:docstring>
@@ -33,22 +30,34 @@
                     value="update_engine::UpdateParams"/>
       </arg>
     </method>
-    <!-- TODO(zeuthen,chromium:286399): Rename to AttemptUpdate and
-         update Chrome and other users of the AttemptUpdate() method
-         in lockstep.
-    -->
-    <method name="AttemptUpdateWithFlags">
-      <arg type="s" name="app_version" direction="in" />
-      <arg type="s" name="omaha_url" direction="in" />
-      <!-- See AttemptUpdateFlags enum in update_engine/dbus-constants.h. -->
-      <arg type="i" name="flags" direction="in" />
+    <!-- TODO(b/242813465): DEPRECATE -->
+    <method name="ApplyDeferredUpdate">
     </method>
+    <method name="ApplyDeferredUpdateAdvanced">
+      <arg type="ay" name="config" direction="in">
+        <tp:docstring>
+          The configuration for applying the update.
+        </tp:docstring>
+        <annotation name="org.chromium.DBus.Argument.ProtobufClass"
+                    value="update_engine::ApplyUpdateConfig"/>
+      </arg>
+    </method>
+    <!-- TODO(b/219067273): DEPRECATE -->
     <method name="AttemptInstall">
       <arg type="s" name="omaha_url" direction="in" />
       <arg type="as" name="dlc_ids" direction="in">
         <tp:docstring>
           The list of DLC IDs that needs to be installed.
         </tp:docstring>
+      </arg>
+    </method>
+    <method name="Install">
+      <arg type="ay" name="install_params" direction="in">
+        <tp:docstring>
+          The install parameters for DLC.
+        </tp:docstring>
+        <annotation name="org.chromium.DBus.Argument.ProtobufClass"
+                    value="update_engine::InstallParams"/>
       </arg>
     </method>
     <method name="AttemptRollback">
@@ -79,6 +88,9 @@
         <annotation name="org.chromium.DBus.Argument.ProtobufClass"
                     value="update_engine::StatusResult"/>
       </arg>
+    </method>
+    <method name="SetStatus">
+      <arg type="i" name="update_status" direction="in" />
     </method>
     <method name="RebootIfNeeded">
     </method>
@@ -120,9 +132,13 @@
     <method name="GetUpdateOverCellularPermission">
       <arg type="b" name="allowed" direction="out" />
     </method>
-     <method name="ToggleFeature">
+    <method name="ToggleFeature">
       <arg type="s" name="feature" direction="in" />
       <arg type="b" name="enable" direction="in" />
+    </method>
+    <method name="IsFeatureEnabled">
+      <arg type="s" name="feature" direction="in" />
+      <arg type="b" name="enabled" direction="out" />
     </method>
     <method name="GetDurationSinceUpdate">
       <arg type="x" name="usec_wallclock" direction="out" />

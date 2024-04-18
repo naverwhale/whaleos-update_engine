@@ -52,7 +52,7 @@ class MetricsReporterOmahaTest : public ::testing::Test {
 };
 
 TEST_F(MetricsReporterOmahaTest, ReportDailyMetrics) {
-  TimeDelta age = TimeDelta::FromDays(10);
+  TimeDelta age = base::Days(10);
   EXPECT_CALL(*mock_metrics_lib_,
               SendToUMA(metrics::kMetricDailyOSAgeDays, _, _, _, _))
       .Times(1);
@@ -177,8 +177,8 @@ TEST_F(MetricsReporterOmahaTest, ReportUpdateAttemptMetrics) {
 
   int attempt_number = 1;
   PayloadType payload_type = kPayloadTypeFull;
-  TimeDelta duration = TimeDelta::FromMinutes(1000);
-  TimeDelta duration_uptime = TimeDelta::FromMinutes(1000);
+  TimeDelta duration = base::Minutes(1000);
+  TimeDelta duration_uptime = base::Minutes(1000);
 
   int64_t payload_size = 100 * kNumBytesInOneMiB;
 
@@ -302,8 +302,8 @@ TEST_F(MetricsReporterOmahaTest, ReportSuccessfulUpdateMetrics) {
   // 200MiB payload downloaded from HttpsServer.
   num_bytes_downloaded[0] = 200 * kNumBytesInOneMiB;
   int download_overhead_percentage = 20;
-  TimeDelta total_duration = TimeDelta::FromMinutes(30);
-  TimeDelta total_duration_uptime = TimeDelta::FromMinutes(20);
+  TimeDelta total_duration = base::Minutes(30);
+  TimeDelta total_duration_uptime = base::Minutes(20);
   int reboot_count = 2;
   int url_switch_count = 2;
 
@@ -406,12 +406,21 @@ TEST_F(MetricsReporterOmahaTest, ReportEnterpriseRollbackMetrics) {
   EXPECT_CALL(*mock_metrics_lib_,
               SendSparseToUMA(metrics::kMetricEnterpriseRollbackSuccess, 10575))
       .Times(1);
+  reporter_.ReportEnterpriseRollbackMetrics(
+      metrics::kMetricEnterpriseRollbackSuccess, "10575.39.2");
+
   EXPECT_CALL(*mock_metrics_lib_,
               SendSparseToUMA(metrics::kMetricEnterpriseRollbackFailure, 10323))
       .Times(1);
+  reporter_.ReportEnterpriseRollbackMetrics(
+      metrics::kMetricEnterpriseRollbackFailure, "10323.67.7");
 
-  reporter_.ReportEnterpriseRollbackMetrics(/*success=*/true, "10575.39.2");
-  reporter_.ReportEnterpriseRollbackMetrics(/*success=*/false, "10323.67.7");
+  EXPECT_CALL(
+      *mock_metrics_lib_,
+      SendSparseToUMA(metrics::kMetricEnterpriseRollbackBlockedByFSI, 10324))
+      .Times(1);
+  reporter_.ReportEnterpriseRollbackMetrics(
+      metrics::kMetricEnterpriseRollbackBlockedByFSI, "10324.63.0");
 }
 
 TEST_F(MetricsReporterOmahaTest, ReportCertificateCheckMetrics) {
@@ -445,6 +454,42 @@ TEST_F(MetricsReporterOmahaTest, ReportTimeToReboot) {
       .Times(1);
 
   reporter_.ReportTimeToReboot(time_to_reboot_minutes);
+}
+
+TEST_F(MetricsReporterOmahaTest, ReportInvalidatedUpdateSuccess) {
+  EXPECT_CALL(*mock_metrics_lib_,
+              SendBoolToUMA(metrics::kMetricInvalidatedUpdate, true))
+      .Times(1);
+
+  reporter_.ReportInvalidatedUpdate(true);
+}
+
+TEST_F(MetricsReporterOmahaTest, ReportInvalidatedUpdateFailure) {
+  EXPECT_CALL(*mock_metrics_lib_,
+              SendBoolToUMA(metrics::kMetricInvalidatedUpdate, false))
+      .Times(1);
+
+  reporter_.ReportInvalidatedUpdate(false);
+}
+
+TEST_F(MetricsReporterOmahaTest,
+       ReportEnterpriseUpdateInvalidatedResultSuccess) {
+  EXPECT_CALL(
+      *mock_metrics_lib_,
+      SendBoolToUMA(metrics::kMetricEnterpriseUpdateInvalidatedResult, true))
+      .Times(1);
+
+  reporter_.ReportEnterpriseUpdateInvalidatedResult(true);
+}
+
+TEST_F(MetricsReporterOmahaTest,
+       ReportEnterpriseUpdateInvalidatedResultFailure) {
+  EXPECT_CALL(
+      *mock_metrics_lib_,
+      SendBoolToUMA(metrics::kMetricEnterpriseUpdateInvalidatedResult, false))
+      .Times(1);
+
+  reporter_.ReportEnterpriseUpdateInvalidatedResult(false);
 }
 
 TEST_F(MetricsReporterOmahaTest, ReportInstallDateProvisioningSource) {

@@ -19,8 +19,8 @@
 #include <algorithm>
 #include <string>
 
-#include <base/bind.h>
 #include <base/format_macros.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
@@ -127,8 +127,8 @@ void FileFetcher::ScheduleRead() {
   ongoing_read_ = stream_->ReadAsync(
       buffer_.data(),
       bytes_to_read,
-      base::Bind(&FileFetcher::OnReadDoneCallback, base::Unretained(this)),
-      base::Bind(&FileFetcher::OnReadErrorCallback, base::Unretained(this)),
+      base::BindOnce(&FileFetcher::OnReadDoneCallback, base::Unretained(this)),
+      base::BindOnce(&FileFetcher::OnReadErrorCallback, base::Unretained(this)),
       nullptr);
 
   if (!ongoing_read_) {

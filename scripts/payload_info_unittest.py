@@ -23,17 +23,14 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
+from contextlib import contextmanager
 import sys
 import unittest
 from unittest import mock
 
-from contextlib import contextmanager
-
-from six.moves import StringIO
-
 import payload_info
+from six.moves import StringIO
 import update_payload
-
 from update_payload import update_metadata_pb2
 
 
@@ -41,7 +38,7 @@ class FakePayloadError(Exception):
   """A generic error when using the FakePayload."""
 
 
-class FakeOption(object):
+class FakeOption:
   """Fake options object for testing."""
 
   def __init__(self, **kwargs):
@@ -52,9 +49,11 @@ class FakeOption(object):
       setattr(self, key, val)
     if not hasattr(self, 'payload_file'):
       self.payload_file = None
+    if not hasattr(self, 'zipfile'):
+      self.zipfile = None
 
 
-class FakeOp(object):
+class FakeOp:
   """Fake manifest operation for testing."""
 
   def __init__(self, src_extents, dst_extents, op_type, **kwargs):
@@ -68,20 +67,20 @@ class FakeOp(object):
     return hasattr(self, field)
 
 
-class FakeExtent(object):
+class FakeExtent:
   """Fake Extent for testing."""
   def __init__(self, start_block, num_blocks):
     self.start_block = start_block
     self.num_blocks = num_blocks
 
 
-class FakePartitionInfo(object):
+class FakePartitionInfo:
   """Fake PartitionInfo for testing."""
   def __init__(self, size):
     self.size = size
 
 
-class FakePartition(object):
+class FakePartition:
   """Fake PartitionUpdate field for testing."""
 
   def __init__(self, partition_name, operations, old_size, new_size):
@@ -89,9 +88,10 @@ class FakePartition(object):
     self.operations = operations
     self.old_partition_info = FakePartitionInfo(old_size)
     self.new_partition_info = FakePartitionInfo(new_size)
+    self.version = 'fake-timestamp'
 
 
-class FakeManifest(object):
+class FakeManifest:
   """Fake manifest for testing."""
 
   def __init__(self):
@@ -120,7 +120,7 @@ class FakeManifest(object):
     return hasattr(self, field_name) and getattr(self, field_name) is not None
 
 
-class FakeHeader(object):
+class FakeHeader:
   """Fake payload header for testing."""
 
   def __init__(self, manifest_len, metadata_signature_len):
@@ -133,7 +133,7 @@ class FakeHeader(object):
     return 24
 
 
-class FakePayload(object):
+class FakePayload:
   """Fake payload for testing."""
 
   def __init__(self):
@@ -227,6 +227,8 @@ Manifest length:             222
 Number of partitions:        2
   Number of "root" ops:      1
   Number of "kernel" ops:    1
+Timestamp for root:          fake-timestamp
+Timestamp for kernel:        fake-timestamp
 Block size:                  4096
 Minor version:               4
 """
@@ -242,6 +244,8 @@ Manifest length:             222
 Number of partitions:        2
   Number of "root" ops:      1
   Number of "kernel" ops:    1
+Timestamp for root:          fake-timestamp
+Timestamp for kernel:        fake-timestamp
 Block size:                  4096
 Minor version:               4
 
@@ -271,6 +275,8 @@ Manifest length:             222
 Number of partitions:        2
   Number of "root" ops:      1
   Number of "kernel" ops:    1
+Timestamp for root:          fake-timestamp
+Timestamp for kernel:        fake-timestamp
 Block size:                  4096
 Minor version:               4
 Blocks read:                 11
@@ -289,6 +295,8 @@ Manifest length:             222
 Number of partitions:        2
   Number of "root" ops:      1
   Number of "kernel" ops:    1
+Timestamp for root:          fake-timestamp
+Timestamp for kernel:        fake-timestamp
 Block size:                  4096
 Minor version:               4
 No metadata signatures stored in the payload
@@ -310,6 +318,8 @@ Manifest length:             222
 Number of partitions:        2
   Number of "root" ops:      1
   Number of "kernel" ops:    1
+Timestamp for root:          fake-timestamp
+Timestamp for kernel:        fake-timestamp
 Block size:                  4096
 Minor version:               4
 Metadata signatures blob:    file_offset=246 (7 bytes)

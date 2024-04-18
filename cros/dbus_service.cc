@@ -17,6 +17,7 @@
 #include "update_engine/cros/dbus_service.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <update_engine/dbus-constants.h>
@@ -53,6 +54,13 @@ void ConvertToStatusResult(const UpdateEngineStatus& ue_status,
   out_status->set_last_attempt_error(ue_status.last_attempt_error);
   out_status->set_update_urgency(
       static_cast<UpdateUrgency>(ue_status.update_urgency_internal));
+  for (const auto& feature : ue_status.features) {
+    auto* out_feature = out_status->add_features();
+    out_feature->set_name(feature.name);
+    out_feature->set_enabled(feature.enabled);
+  }
+  out_status->set_is_interactive(ue_status.is_interactive);
+  out_status->set_will_defer_update(ue_status.will_defer_update);
 }
 }  // namespace
 
@@ -60,40 +68,31 @@ DBusUpdateEngineService::DBusUpdateEngineService()
     : common_(new UpdateEngineService()) {}
 
 // org::chromium::UpdateEngineInterfaceInterface methods implementation.
-bool DBusUpdateEngineService::AttemptUpdate(ErrorPtr* error,
-                                            const string& in_app_version,
-                                            const string& in_omaha_url) {
-  return AttemptUpdateWithFlags(
-      error, in_app_version, in_omaha_url, 0 /* no flags */);
-}
-
 bool DBusUpdateEngineService::Update(
     ErrorPtr* error, const update_engine::UpdateParams& in_update_params) {
   bool result;
   return common_->Update(error, in_update_params, &result);
 }
 
-bool DBusUpdateEngineService::AttemptUpdateWithFlags(
-    ErrorPtr* error,
-    const string& in_app_version,
-    const string& in_omaha_url,
-    int32_t in_flags_as_int) {
-  update_engine::AttemptUpdateFlags flags =
-      static_cast<update_engine::AttemptUpdateFlags>(in_flags_as_int);
-  bool interactive = !(flags & update_engine::kAttemptUpdateFlagNonInteractive);
-  bool result;
-  return common_->AttemptUpdate(
-      error,
-      in_app_version,
-      in_omaha_url,
-      interactive ? 0 : update_engine::UpdateAttemptFlags::kFlagNonInteractive,
-      &result);
+bool DBusUpdateEngineService::ApplyDeferredUpdate(ErrorPtr* error) {
+  return common_->ApplyDeferredUpdate(error, /*shutdown=*/false);
+}
+
+bool DBusUpdateEngineService::ApplyDeferredUpdateAdvanced(
+    ErrorPtr* error, const update_engine::ApplyUpdateConfig& config) {
+  return common_->ApplyDeferredUpdate(
+      error, config.done_action() == update_engine::UpdateDoneAction::SHUTDOWN);
 }
 
 bool DBusUpdateEngineService::AttemptInstall(ErrorPtr* error,
                                              const string& in_omaha_url,
                                              const vector<string>& dlc_ids) {
   return common_->AttemptInstall(error, in_omaha_url, dlc_ids);
+}
+
+bool DBusUpdateEngineService::Install(
+    ErrorPtr* error, const update_engine::InstallParams& install_params) {
+  return common_->Install(error, install_params);
 }
 
 bool DBusUpdateEngineService::AttemptRollback(ErrorPtr* error,
@@ -125,6 +124,17 @@ bool DBusUpdateEngineService::GetStatusAdvanced(ErrorPtr* error,
 
   ConvertToStatusResult(status, out_status);
   return true;
+}
+
+bool DBusUpdateEngineService::SetStatus(ErrorPtr* error,
+                                        int32_t update_status) {
+  if (update_status < 0 ||
+      update_status > static_cast<int32_t>(update_engine::UpdateStatus::MAX)) {
+    LOG(ERROR) << "Passed value is not a valid update state.";
+    return false;
+  }
+  return common_->SetStatus(
+      error, static_cast<update_engine::UpdateStatus>(update_status));
 }
 
 bool DBusUpdateEngineService::RebootIfNeeded(ErrorPtr* error) {
@@ -187,6 +197,12 @@ bool DBusUpdateEngineService::ToggleFeature(brillo::ErrorPtr* error,
   return common_->ToggleFeature(error, feature, enable);
 }
 
+bool DBusUpdateEngineService::IsFeatureEnabled(brillo::ErrorPtr* error,
+                                               const string& feature,
+                                               bool* out_enabled) {
+  return common_->IsFeatureEnabled(error, feature, out_enabled);
+}
+
 bool DBusUpdateEngineService::GetDurationSinceUpdate(
     ErrorPtr* error, int64_t* out_usec_wallclock) {
   return common_->GetDurationSinceUpdate(error, out_usec_wallclock);
@@ -216,9 +232,9 @@ UpdateEngineAdaptor::UpdateEngineAdaptor()
                    dbus::ObjectPath(update_engine::kUpdateEngineServicePath)) {}
 
 void UpdateEngineAdaptor::RegisterAsync(
-    const base::Callback<void(bool)>& completion_callback) {
+    base::OnceCallback<void(bool)> completion_callback) {
   RegisterWithDBusObject(&dbus_object_);
-  dbus_object_.RegisterAsync(completion_callback);
+  dbus_object_.RegisterAsync(std::move(completion_callback));
 }
 
 bool UpdateEngineAdaptor::RequestOwnership() {

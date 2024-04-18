@@ -19,12 +19,13 @@
 #include <inttypes.h>
 
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/notreached.h>
 #include <base/rand_util.h>
@@ -62,6 +63,9 @@ using std::string;
 
 namespace chromeos_update_engine {
 namespace {
+
+constexpr char kCriticalAppVersion[] = "ForcedUpdate";
+
 // Parses |str| and returns |true| iff its value is "true".
 bool ParseBool(const string& str) {
   return str == "true";
@@ -254,9 +258,12 @@ void OmahaRequestAction::PerformAction() {
   string request_post = omaha_request.GetRequest();
 
   // Set X-Goog-Update headers.
-  const auto* params = SystemState::Get()->request_params();
+  auto* system_state = SystemState::Get();
+  const auto* params = system_state->request_params();
+  auto* update_attempter = system_state->update_attempter();
+  bool interactive = params->interactive() || !update_attempter->IsUpdating();
   http_fetcher_->SetHeader(kXGoogleUpdateInteractivity,
-                           params->interactive() ? "fg" : "bg");
+                           interactive ? "fg" : "bg");
   http_fetcher_->SetHeader(kXGoogleUpdateAppId, params->GetAppId());
   http_fetcher_->SetHeader(
       kXGoogleUpdateUpdater,
@@ -293,7 +300,7 @@ bool OmahaRequestAction::UpdateLastPingDays() {
   // Remember the local time that matches the server's last midnight
   // time.
   auto* prefs = SystemState::Get()->prefs();
-  Time daystart = Time::Now() - TimeDelta::FromSeconds(elapsed_seconds);
+  Time daystart = Time::Now() - base::Seconds(elapsed_seconds);
   prefs->SetInt64(kPrefsLastActivePingDay, daystart.ToInternalValue());
   prefs->SetInt64(kPrefsLastRollCallPingDay, daystart.ToInternalValue());
   return true;
@@ -547,8 +554,10 @@ bool OmahaRequestAction::ParseResponse(ScopedActionCompleter* completer) {
     // non-critical package installations, let the errors propagate instead
     // of being handled inside update_engine as installations are a dlcservice
     // specific feature.
-    bool can_exclude = (!params->is_install() && params->IsDlcAppId(app.id)) ||
-                       params->IsMiniOSAppId(app.id);
+    bool can_exclude =
+        (!params->is_install() && params->IsDlcAppId(app.id) &&
+         !params->dlc_apps_params().at(app.id).critical_update) ||
+        params->IsMiniOSAppId(app.id);
     if (!ParsePackage(&app, can_exclude, completer))
       return false;
   }
@@ -578,6 +587,8 @@ bool OmahaRequestAction::ParseStatus(ScopedActionCompleter* completer) {
       }
       // Don't update if any app has status="noupdate".
       LOG(INFO) << "No update for App " << app.id;
+      LOG(INFO) << "Reason for no update: " << app.updatecheck.no_update_reason;
+      response_.no_update_reason = app.updatecheck.no_update_reason;
       response_.update_exists = false;
       break;
     } else if (status == "ok") {
@@ -865,8 +876,8 @@ void OmahaRequestAction::LookupPayloadViaP2P() {
   // working on. Otherwise we may end up in a situation where two
   // devices bounce back and forth downloading from each other,
   // neither making any forward progress until one of them decides to
-  // stop using p2p (via kMaxP2PAttempts and kMaxP2PAttemptTimeSeconds
-  // safe-guards). See http://crbug.com/297170 for an example)
+  // stop using p2p (via kMaxP2PAttempts and kMaxP2PAttemptTime safe-guards).
+  // See http://crbug.com/297170 for an example)
   size_t minimum_size = 0;
   int64_t manifest_metadata_size = 0;
   int64_t manifest_signature_size = 0;
@@ -899,14 +910,20 @@ void OmahaRequestAction::LookupPayloadViaP2P() {
     SystemState::Get()->p2p_manager()->LookupUrlForFile(
         file_id,
         minimum_size,
-        TimeDelta::FromSeconds(kMaxP2PNetworkWaitTimeSeconds),
-        base::Bind(&OmahaRequestAction::OnLookupPayloadViaP2PCompleted,
-                   base::Unretained(this)));
+        kMaxP2PNetworkWaitTime,
+        base::BindOnce(&OmahaRequestAction::OnLookupPayloadViaP2PCompleted,
+                       base::Unretained(this)));
   }
 }
 
 bool OmahaRequestAction::ShouldDeferDownload() {
   const auto* params = SystemState::Get()->request_params();
+
+  if (params->is_install()) {
+    LOG(INFO) << "Never defer DLC installations.";
+    return false;
+  }
+
   if (params->interactive()) {
     LOG(INFO) << "Not deferring download because update is interactive.";
     return false;
@@ -974,14 +991,13 @@ OmahaRequestAction::IsWallClockBasedWaitingSatisfied() {
 
   TimeDelta elapsed_time =
       SystemState::Get()->clock()->GetWallclockTime() - update_first_seen_at;
-  TimeDelta max_scatter_period =
-      TimeDelta::FromDays(response_.max_days_to_scatter);
+  TimeDelta max_scatter_period = base::Days(response_.max_days_to_scatter);
   int64_t staging_wait_time_in_days = 0;
   // Use staging and its default max value if staging is on.
   if (SystemState::Get()->prefs()->GetInt64(kPrefsWallClockStagingWaitPeriod,
                                             &staging_wait_time_in_days) &&
       staging_wait_time_in_days > 0)
-    max_scatter_period = TimeDelta::FromDays(kMaxWaitTimeStagingInDays);
+    max_scatter_period = kMaxWaitTimeStagingIn;
 
   const auto* params = SystemState::Get()->request_params();
   LOG(INFO) << "Waiting Period = "
@@ -1110,8 +1126,7 @@ bool OmahaRequestAction::HasInstallDate() {
 
 // static
 bool OmahaRequestAction::PersistInstallDate(
-    int install_date_days,
-    InstallDateProvisioningSource source) {
+    int install_date_days, InstallDateProvisioningSource source) {
   TEST_AND_RETURN_FALSE(install_date_days >= 0);
 
   auto* prefs = SystemState::Get()->prefs();
@@ -1203,6 +1218,8 @@ void OmahaRequestAction::ActionCompleted(ErrorCode code) {
 
     case ErrorCode::kOmahaUpdateIgnoredPerPolicy:
     case ErrorCode::kOmahaUpdateIgnoredOverCellular:
+    case ErrorCode::kOmahaUpdateIgnoredOverMetered:
+    case ErrorCode::kUpdateIgnoredRollbackVersion:
       result = metrics::CheckResult::kUpdateAvailable;
       reaction = metrics::CheckReaction::kIgnored;
       break;
@@ -1237,19 +1254,25 @@ void OmahaRequestAction::ActionCompleted(ErrorCode code) {
 }
 
 bool OmahaRequestAction::ShouldIgnoreUpdate(ErrorCode* error) const {
+  const auto* params = SystemState::Get()->request_params();
+  if (params->is_install()) {
+    LOG(INFO) << "Never ignore DLC installations.";
+    return false;
+  }
+
+  const auto* hardware = SystemState::Get()->hardware();
   // Never ignore valid update when running from MiniOS.
-  if (SystemState::Get()->hardware()->IsRunningFromMiniOs())
+  if (hardware->IsRunningFromMiniOs())
     return false;
 
   // Note: policy decision to not update to a version we rolled back from.
   string rollback_version =
       SystemState::Get()->payload_state()->GetRollbackVersion();
-  const auto* params = SystemState::Get()->request_params();
   if (!rollback_version.empty()) {
     LOG(INFO) << "Detected previous rollback from version " << rollback_version;
     if (rollback_version == response_.version) {
       LOG(INFO) << "Received version that we rolled back from. Ignoring.";
-      *error = ErrorCode::kOmahaUpdateIgnoredPerPolicy;
+      *error = ErrorCode::kUpdateIgnoredRollbackVersion;
       return true;
     }
   }
@@ -1258,19 +1281,31 @@ bool OmahaRequestAction::ShouldIgnoreUpdate(ErrorCode* error) const {
     return true;
   }
 
-  if (SystemState::Get()->hardware()->IsOOBEEnabled() &&
-      !SystemState::Get()->hardware()->IsOOBEComplete(nullptr) &&
+  if (hardware->IsOOBEEnabled() && !hardware->IsOOBEComplete(nullptr) &&
       (response_.deadline.empty() ||
        SystemState::Get()->payload_state()->GetRollbackHappened()) &&
-      params->app_version() != "ForcedUpdate") {
-    LOG(INFO) << "Ignoring a non-critical Omaha update before OOBE completion.";
-    *error = ErrorCode::kNonCriticalUpdateInOOBE;
+      params->app_version() != kCriticalAppVersion) {
+    if (!hardware->IsConsumerSegmentSet(hardware->ReadLocalState().get())) {
+      LOG(INFO)
+          << "Ignoring a non-critical Omaha update before OOBE completion.";
+      *error = ErrorCode::kNonCriticalUpdateInOOBE;
+      return true;
+    }
+    LOG(INFO) << "Considering a non-critical Omaha update  for consumer "
+                 "segment users before OOBE completion.";
+  }
+
+  if (hardware->IsEnrollmentRecoveryModeEnabled(
+          hardware->ReadLocalState().get()) &&
+      response_.deadline.empty() &&
+      params->app_version() != kCriticalAppVersion) {
+    LOG(INFO) << "Ignoring non-critical Omaha update as enrollment "
+              << "recovery mode is enabled.";
+    *error = ErrorCode::kNonCriticalUpdateEnrollmentRecovery;
     return true;
   }
 
-  if (params->is_install()) {
-    LOG(INFO) << "Skipping connection type check for DLC installations.";
-  } else if (!IsUpdateAllowedOverCurrentConnection(error)) {
+  if (!IsUpdateAllowedOverCurrentConnection(error)) {
     LOG(INFO) << "Update is not allowed over current connection.";
     return true;
   }
@@ -1376,38 +1411,34 @@ bool OmahaRequestAction::IsUpdateAllowedOverCellularByPrefs() const {
 bool OmahaRequestAction::IsUpdateAllowedOverCurrentConnection(
     ErrorCode* error) const {
   ConnectionType type;
-  ConnectionTethering tethering;
+  bool metered = false;
   ConnectionManagerInterface* connection_manager =
       SystemState::Get()->connection_manager();
-  if (!connection_manager->GetConnectionProperties(&type, &tethering)) {
+  if (!connection_manager->GetConnectionProperties(&type, &metered)) {
     LOG(INFO) << "We could not determine our connection type. "
               << "Defaulting to allow updates.";
     return true;
   }
 
-  bool is_allowed = connection_manager->IsUpdateAllowedOver(type, tethering);
-  bool is_device_policy_set =
-      connection_manager->IsAllowedConnectionTypesForUpdateSet();
-  // Treats tethered connection as if it is cellular connection.
-  bool is_over_cellular = type == ConnectionType::kCellular ||
-                          tethering == ConnectionTethering::kConfirmed;
+  if (!metered) {
+    LOG(INFO) << "We are connected via an unmetered network, type: "
+              << connection_utils::StringForConnectionType(type);
+    return true;
+  }
 
-  if (!is_over_cellular) {
-    // There's no need to further check user preferences as we are not over
-    // cellular connection.
-    if (!is_allowed)
-      *error = ErrorCode::kOmahaUpdateIgnoredPerPolicy;
-  } else if (is_device_policy_set) {
+  bool is_allowed = true;
+  if (connection_manager->IsAllowedConnectionTypesForUpdateSet()) {
     // There's no need to further check user preferences as the device policy
-    // is set regarding updates over cellular.
-    if (!is_allowed)
+    // is set regarding updates over metered network.
+    LOG(INFO) << "Current connection is metered, checking device policy.";
+    if (!(is_allowed = connection_manager->IsUpdateAllowedOverMetered()))
       *error = ErrorCode::kOmahaUpdateIgnoredPerPolicy;
-  } else {
+  } else if (!(is_allowed = IsUpdateAllowedOverCellularByPrefs())) {
     // Deivce policy is not set, so user preferences overwrite whether to
-    // allow updates over cellular.
-    is_allowed = IsUpdateAllowedOverCellularByPrefs();
-    if (!is_allowed)
-      *error = ErrorCode::kOmahaUpdateIgnoredOverCellular;
+    // allow updates over metered network.
+    *error = type == ConnectionType::kCellular
+                 ? ErrorCode::kOmahaUpdateIgnoredOverCellular
+                 : ErrorCode::kOmahaUpdateIgnoredOverMetered;
   }
 
   LOG(INFO) << "We are connected via "

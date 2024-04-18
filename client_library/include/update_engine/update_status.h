@@ -18,6 +18,7 @@
 #define UPDATE_ENGINE_CLIENT_LIBRARY_INCLUDE_UPDATE_ENGINE_UPDATE_STATUS_H_
 
 #include <string>
+#include <vector>
 
 #include <brillo/enum_flags.h>
 
@@ -50,6 +51,9 @@ enum class UpdateStatus {
   // allow updates, e.g. over cellular network.
   NEED_PERMISSION_TO_UPDATE = 10,
   CLEANUP_PREVIOUS_UPDATE = 11,
+  UPDATED_BUT_DEFERRED = 12,
+
+  MAX = UPDATED_BUT_DEFERRED,
 
   // This value is exclusively used in Chrome. DO NOT define nor use it.
   // TODO(crbug.com/977320): Remove this value from chrome by refactoring the
@@ -73,6 +77,15 @@ enum UpdateAttemptFlags : int32_t {
   kFlagNonInteractive = (1 << 0),
 };
 
+// A struct representing feature that is managed by update_engine.
+typedef struct FeatureInternal {
+  std::string name;
+  bool enabled;
+} FeatureInternal;
+
+// List of `FeatureInternal`s.
+using FeatureInternalList = std::vector<FeatureInternal>;
+
 // Enable bit-wise operators for the above enumeration of flag values.
 DECLARE_FLAGS_ENUM(UpdateAttemptFlags);
 
@@ -89,8 +102,8 @@ struct UpdateEngineStatus {
   uint64_t new_size_bytes;
   // New product version.
   std::string new_version;
-  // Wether the update is an enterprise rollback. The value is valid only if the
-  // current operation is passed CHECKING_FOR_UPDATE.
+  // Whether the update is an enterprise rollback. The value is valid only if
+  // the current operation is passed CHECKING_FOR_UPDATE.
   bool is_enterprise_rollback;
   // Indication of install for DLC(s).
   bool is_install;
@@ -102,6 +115,12 @@ struct UpdateEngineStatus {
   int32_t last_attempt_error;
   // How urgent an update is, critical or regular.
   UpdateUrgencyInternal update_urgency_internal;
+  // Features managed by update_engine.
+  FeatureInternalList features;
+  // Whether the update is interactive.
+  bool is_interactive;
+  // The update will be downloaded but deferred.
+  bool will_defer_update;
 };
 
 }  // namespace update_engine

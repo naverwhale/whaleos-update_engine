@@ -45,13 +45,16 @@ class BootControlInterface;
 class ConnectionManagerInterface;
 class CrosHealthdInterface;
 class DlcServiceInterface;
+class DlcUtilsInterface;
 class HardwareInterface;
+class HibernateInterface;
 class MetricsReporterInterface;
 class OmahaRequestParams;
 class P2PManager;
 class PayloadStateInterface;
 class PowerManagerInterface;
 class UpdateAttempter;
+class CallWrapperInterface;
 
 // An interface to global system context, including platform resources,
 // the current state of the system, high-level objects whose lifetime is same
@@ -81,6 +84,9 @@ class SystemState {
 
   // Gets the hardware interface object.
   virtual HardwareInterface* hardware() = 0;
+
+  // Gets the hibernate interface object.
+  virtual HibernateInterface* hibernate() = 0;
 
   // Gets the Metrics Library interface for reporting UMA stats.
   virtual MetricsReporterInterface* metrics_reporter() = 0;
@@ -121,8 +127,14 @@ class SystemState {
   // Returns a pointer to the DlcServiceInterface singleton.
   virtual DlcServiceInterface* dlcservice() = 0;
 
+  // Returns a pointer to the DlcUtilsInterface singleton.
+  virtual DlcUtilsInterface* dlc_utils() = 0;
+
   // Returns a pointer to the CrosHealthdInteraface singleton.
   virtual CrosHealthdInterface* cros_healthd() = 0;
+
+  // Returns a pointer to the CallWrapperInterface singleton.
+  virtual CallWrapperInterface* call_wrapper() = 0;
 
  protected:
   static SystemState* g_pointer_;

@@ -48,16 +48,16 @@ namespace chromeos_update_engine {
 
 using metrics_utils::GetPersistedValue;
 
-const TimeDelta PayloadState::kDurationSlack = TimeDelta::FromSeconds(600);
+constexpr TimeDelta PayloadState::kDurationSlack = base::Minutes(10);
 
 // We want to upperbound backoffs to 16 days
-static const int kMaxBackoffDays = 16;
+static constexpr TimeDelta kMaxBackoff = base::Days(16);
 
 // We want to randomize retry attempts after the backoff by +/- 6 hours.
 static const uint32_t kMaxBackoffFuzzMinutes = 12 * 60;
 
 // Limit persisting current update duration uptime to once per second
-static const uint64_t kUptimeResolution = 1;
+static const TimeDelta kUptimeResolution = base::Seconds(1);
 
 PayloadState::PayloadState()
     : prefs_(nullptr),
@@ -203,15 +203,15 @@ void PayloadState::AttemptStarted(AttemptType attempt_type) {
 
   metrics::ConnectionType type;
   ConnectionType network_connection_type;
-  ConnectionTethering tethering;
+  bool metered = false;
   ConnectionManagerInterface* connection_manager =
       SystemState::Get()->connection_manager();
   if (!connection_manager->GetConnectionProperties(&network_connection_type,
-                                                   &tethering)) {
+                                                   &metered)) {
     LOG(ERROR) << "Failed to determine connection type.";
     type = metrics::ConnectionType::kUnknown;
   } else {
-    type = metrics_utils::GetConnectionType(network_connection_type, tethering);
+    type = metrics_utils::GetConnectionType(network_connection_type, metered);
   }
   attempt_connection_type_ = type;
 
@@ -260,14 +260,30 @@ void PayloadState::UpdateSucceeded() {
 
 void PayloadState::UpdateFailed(ErrorCode error) {
   ErrorCode base_error = utils::GetBaseErrorCode(error);
+  const std::string base_error_str = utils::ErrorCodeToString(base_error);
+
+  utils::LogAlertTag(base_error);
+
   LOG(INFO) << "Updating payload state for error code: " << base_error << " ("
-            << utils::ErrorCodeToString(base_error) << ")";
+            << base_error_str << ")";
 
   if (candidate_urls_.size() == 0) {
     // This means we got this error even before we got a valid Omaha response
     // or don't have any valid candidates in the Omaha response.
     // So we should not advance the url_index_ in such cases.
     LOG(INFO) << "Ignoring failures until we get a valid Omaha response.";
+
+    // Still report out the error code. (Not doing so here causes gaps in the
+    // metrics reporting as we will omit certain internal error codes from being
+    // tracked).
+    // |error| should never be |ErrorCode::kSuccess| but double check.
+    if (error != ErrorCode::kSuccess) {
+      LOG(INFO) << "Reporting internal error code: " << base_error << " ("
+                << base_error_str << ")";
+      SystemState::Get()->metrics_reporter()->ReportInternalErrorCode(
+          base_error);
+    }
+
     return;
   }
 
@@ -378,6 +394,10 @@ void PayloadState::UpdateFailed(ErrorCode error) {
     case ErrorCode::kDownloadCancelledPerPolicy:
     case ErrorCode::kRepeatedFpFromOmahaError:
     case ErrorCode::kInvalidateLastUpdate:
+    case ErrorCode::kOmahaUpdateIgnoredOverMetered:
+    case ErrorCode::kScaledInstallationError:
+    case ErrorCode::kNonCriticalUpdateEnrollmentRecovery:
+    case ErrorCode::kUpdateIgnoredRollbackVersion:
       LOG(INFO) << "Not incrementing URL index or failure count for this error";
       break;
 
@@ -413,6 +433,10 @@ bool PayloadState::ShouldBackoffDownload() {
   }
   if (SystemState::Get()->request_params()->interactive()) {
     LOG(INFO) << "Payload backoff disabled for interactive update checks.";
+    return false;
+  }
+  if (SystemState::Get()->request_params()->is_install()) {
+    LOG(INFO) << "Payload backoff disabled for installations.";
     return false;
   }
   for (const auto& package : response_.packages) {
@@ -551,7 +575,7 @@ void PayloadState::UpdateBackoffExpiryTime() {
 
   // Since we're doing left-shift below, make sure we don't shift more
   // than this. E.g. if int is 4-bytes, don't left-shift more than 30 bits,
-  // since we don't expect value of kMaxBackoffDays to be more than 100 anyway.
+  // since we don't expect value of kMaxBackoff to be more than 100 anyway.
   int num_days = 1;  // the value to be shifted.
   const int kMaxShifts = (sizeof(num_days) * 8) - 2;
 
@@ -560,14 +584,14 @@ void PayloadState::UpdateBackoffExpiryTime() {
   int power = min(GetFullPayloadAttemptNumber() - 1, kMaxShifts);
 
   // The number of days is the minimum of 2 raised to (payload_attempt_number
-  // - 1) or kMaxBackoffDays.
-  num_days = min(num_days << power, kMaxBackoffDays);
+  // - 1) or kMaxBackoff.
+  num_days = min(num_days << power, kMaxBackoff.InDays());
 
   // We don't want all retries to happen exactly at the same time when
   // retrying after backoff. So add some random minutes to fuzz.
   int fuzz_minutes = utils::FuzzInt(0, kMaxBackoffFuzzMinutes);
   TimeDelta next_backoff_interval =
-      TimeDelta::FromDays(num_days) + TimeDelta::FromMinutes(fuzz_minutes);
+      base::Days(num_days) + base::Minutes(fuzz_minutes);
   LOG(INFO) << "Incrementing the backoff expiry time by "
             << utils::FormatTimeDelta(next_backoff_interval);
   SetBackoffExpiryTime(Time::Now() + next_backoff_interval);
@@ -735,8 +759,6 @@ void PayloadState::CollectAndReportSuccessfulUpdateMetrics() {
   int64_t total_bytes_by_source[kNumDownloadSources];
   int64_t successful_bytes = 0;
   int64_t total_bytes = 0;
-  int64_t successful_mbs = 0;
-  int64_t total_mbs = 0;
 
   for (int i = 0; i < kNumDownloadSources; i++) {
     DownloadSource source = static_cast<DownloadSource>(i);
@@ -750,13 +772,11 @@ void PayloadState::CollectAndReportSuccessfulUpdateMetrics() {
 
     bytes = GetCurrentBytesDownloaded(source);
     successful_bytes += bytes;
-    successful_mbs += bytes / kNumBytesInOneMiB;
     SetCurrentBytesDownloaded(source, 0, true);
 
     bytes = GetTotalBytesDownloaded(source);
     total_bytes_by_source[i] = bytes;
     total_bytes += bytes;
-    total_mbs += bytes / kNumBytesInOneMiB;
     SetTotalBytesDownloaded(source, 0, true);
   }
 
@@ -824,7 +844,7 @@ void PayloadState::ResetPersistedState() {
   UpdateBackoffExpiryTime();  // This will reset the backoff expiry time.
   SetUpdateTimestampStart(SystemState::Get()->clock()->GetWallclockTime());
   SetUpdateTimestampEnd(Time());  // Set to null time
-  SetUpdateDurationUptime(TimeDelta::FromSeconds(0));
+  SetUpdateDurationUptime(base::Seconds(0));
   ResetDownloadSourcesOnNewUpdate();
   ResetRollbackVersion();
   SetP2PNumAttempts(0);
@@ -949,7 +969,7 @@ void PayloadState::SetUrlIndex(uint32_t url_index) {
 }
 
 void PayloadState::LoadScatteringWaitPeriod() {
-  SetScatteringWaitPeriod(TimeDelta::FromSeconds(
+  SetScatteringWaitPeriod(base::Seconds(
       GetPersistedValue(kPrefsWallClockScatteringWaitPeriod, prefs_)));
 }
 
@@ -966,7 +986,7 @@ void PayloadState::SetScatteringWaitPeriod(TimeDelta wait_period) {
 }
 
 void PayloadState::LoadStagingWaitPeriod() {
-  SetStagingWaitPeriod(TimeDelta::FromSeconds(
+  SetStagingWaitPeriod(base::Seconds(
       GetPersistedValue(kPrefsWallClockStagingWaitPeriod, prefs_)));
 }
 
@@ -1011,7 +1031,7 @@ void PayloadState::LoadBackoffExpiryTime() {
     return;
 
   Time stored_time = Time::FromInternalValue(stored_value);
-  if (stored_time > Time::Now() + TimeDelta::FromDays(kMaxBackoffDays)) {
+  if (stored_time > Time::Now() + kMaxBackoff) {
     LOG(ERROR) << "Invalid backoff expiry time ("
                << utils::ToString(stored_time)
                << ") in persisted state. Resetting.";
@@ -1091,9 +1111,9 @@ void PayloadState::LoadUpdateDurationUptime() {
     // we'll use zero as the delta
   } else if (!prefs_->GetInt64(kPrefsUpdateDurationUptime, &stored_value)) {
     LOG(ERROR) << "Invalid UpdateDurationUptime value. Resetting.";
-    stored_delta = TimeDelta::FromSeconds(0);
+    stored_delta = base::Seconds(0);
   } else {
-    stored_delta = TimeDelta::FromInternalValue(stored_value);
+    stored_delta = base::TimeDelta::FromInternalValue(stored_value);
   }
 
   // Validation check: Uptime can never be greater than the wall-clock
@@ -1168,7 +1188,7 @@ void PayloadState::CalculateUpdateDurationUptime() {
   Time now = SystemState::Get()->clock()->GetMonotonicTime();
   TimeDelta uptime_since_last_update = now - update_duration_uptime_timestamp_;
 
-  if (uptime_since_last_update > TimeDelta::FromSeconds(kUptimeResolution)) {
+  if (uptime_since_last_update > kUptimeResolution) {
     TimeDelta new_uptime = update_duration_uptime_ + uptime_since_last_update;
     // We're frequently called so avoid logging this write
     SetUpdateDurationUptimeExtended(new_uptime, now, false);
@@ -1417,12 +1437,11 @@ bool PayloadState::P2PAttemptAllowed() {
                  << " - disallowing p2p.";
       return false;
     }
-    if (time_spent_attempting_p2p.InSeconds() > kMaxP2PAttemptTimeSeconds) {
+    if (time_spent_attempting_p2p > kMaxP2PAttemptTime) {
       LOG(INFO) << "Time spent attempting p2p is "
                 << utils::FormatTimeDelta(time_spent_attempting_p2p)
                 << " which is greater than "
-                << utils::FormatTimeDelta(
-                       TimeDelta::FromSeconds(kMaxP2PAttemptTimeSeconds))
+                << utils::FormatTimeDelta(kMaxP2PAttemptTime)
                 << " - disallowing p2p.";
       return false;
     }

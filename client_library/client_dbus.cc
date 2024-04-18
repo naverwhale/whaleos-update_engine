@@ -62,6 +62,8 @@ void ConvertToUpdateEngineStatus(const StatusResult& status,
   out_status->update_urgency_internal =
       static_cast<UpdateUrgencyInternal>(status.update_urgency());
   out_status->last_attempt_error = status.last_attempt_error();
+  out_status->is_interactive = status.is_interactive();
+  out_status->will_defer_update = status.will_defer_update();
 }
 }  // namespace
 
@@ -82,9 +84,18 @@ bool DBusUpdateEngineClient::Update(
   return proxy_->Update(update_params, nullptr);
 }
 
+bool DBusUpdateEngineClient::ApplyDeferredUpdate() {
+  return proxy_->ApplyDeferredUpdate(nullptr);
+}
+
 bool DBusUpdateEngineClient::AttemptInstall(const string& omaha_url,
                                             const vector<string>& dlc_ids) {
   return proxy_->AttemptInstall(omaha_url, dlc_ids, nullptr);
+}
+
+bool DBusUpdateEngineClient::Install(
+    const update_engine::InstallParams& install_params) {
+  return proxy_->Install(install_params, nullptr);
 }
 
 bool DBusUpdateEngineClient::SetDlcActiveValue(bool is_active,
@@ -100,6 +111,10 @@ bool DBusUpdateEngineClient::GetStatus(UpdateEngineStatus* out_status) const {
 
   ConvertToUpdateEngineStatus(status, out_status);
   return true;
+}
+
+bool DBusUpdateEngineClient::SetStatus(UpdateStatus update_status) const {
+  return proxy_->SetStatus(static_cast<int32_t>(update_status), nullptr);
 }
 
 bool DBusUpdateEngineClient::SetCohortHint(const string& cohort_hint) {
@@ -169,12 +184,15 @@ void DBusUpdateEngineClient::DBusStatusHandlersRegistered(
 void DBusUpdateEngineClient::StatusUpdateHandlersRegistered(
     StatusUpdateHandler* handler) const {
   UpdateEngineStatus status;
+  std::vector<update_engine::StatusUpdateHandler*> just_handler = {handler};
+
   if (!GetStatus(&status)) {
-    handler->IPCError("Could not query current status");
+    for (auto h : handler ? just_handler : handlers_) {
+      h->IPCError("Could not query current status");
+    }
     return;
   }
 
-  std::vector<update_engine::StatusUpdateHandler*> just_handler = {handler};
   for (auto h : handler ? just_handler : handlers_) {
     h->HandleStatusUpdate(status);
   }
@@ -216,10 +234,10 @@ bool DBusUpdateEngineClient::RegisterStatusUpdateHandler(
   }
 
   proxy_->RegisterStatusUpdateAdvancedSignalHandler(
-      base::Bind(&DBusUpdateEngineClient::RunStatusUpdateHandlers,
-                 base::Unretained(this)),
-      base::Bind(&DBusUpdateEngineClient::DBusStatusHandlersRegistered,
-                 base::Unretained(this)));
+      base::BindRepeating(&DBusUpdateEngineClient::RunStatusUpdateHandlers,
+                          base::Unretained(this)),
+      base::BindOnce(&DBusUpdateEngineClient::DBusStatusHandlersRegistered,
+                     base::Unretained(this)));
 
   dbus_handler_registered_ = true;
 
@@ -251,6 +269,11 @@ bool DBusUpdateEngineClient::GetLastAttemptError(
 bool DBusUpdateEngineClient::ToggleFeature(const std::string& feature,
                                            bool enable) {
   return proxy_->ToggleFeature(feature, enable, nullptr);
+}
+
+bool DBusUpdateEngineClient::IsFeatureEnabled(const std::string& feature,
+                                              bool* out_enabled) {
+  return proxy_->IsFeatureEnabled(feature, out_enabled, nullptr);
 }
 
 }  // namespace internal

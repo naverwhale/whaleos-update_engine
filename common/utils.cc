@@ -37,11 +37,11 @@
 #include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_file.h>
 #include <base/format_macros.h>
+#include <base/functional/callback.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
@@ -51,11 +51,13 @@
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/data_encoding.h>
+#include <libimageloader/manifest.h>
 
 #include "update_engine/common/constants.h"
 #include "update_engine/common/platform_constants.h"
 #include "update_engine/common/prefs_interface.h"
 #include "update_engine/common/subprocess.h"
+#include "update_engine/common/system_state.h"
 #include "update_engine/payload_consumer/file_descriptor.h"
 
 using base::Time;
@@ -103,9 +105,41 @@ bool GetTempName(const string& path, base::FilePath* template_path) {
   return true;
 }
 
+// Generate a simple hash.
+uint64_t GenerateExclusionHash(const std::string& sp) {
+  uint64_t result = 0;
+  for (const auto& c : sp)
+    result = (result * 131) + static_cast<uint64_t>(c);
+  return result;
+}
+
 }  // namespace
 
 namespace utils {
+
+bool ToggleFeature(const std::string& pref, bool value) {
+  auto* prefs = SystemState::Get()->prefs();
+  LOG(INFO) << "Toggling pref=" << pref << " to " << (value ? "true" : "false");
+  if (!prefs->SetBoolean(pref, value)) {
+    LOG(ERROR) << "Failed to toggle pref=" << pref;
+    return false;
+  }
+  return true;
+}
+
+bool IsFeatureEnabled(const std::string& pref, bool* value) {
+  auto* prefs = SystemState::Get()->prefs();
+  // Treat missing toggle pref as feature being false.
+  if (!prefs->Exists(pref)) {
+    *value = false;
+    return true;
+  }
+  if (!prefs->GetBoolean(pref, value)) {
+    LOG(ERROR) << "Failed to get pref=" << pref;
+    return false;
+  }
+  return true;
+}
 
 bool WriteFile(const char* path, const void* data, size_t data_len) {
   int fd = HANDLE_EINTR(open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600));
@@ -681,7 +715,7 @@ int FuzzInt(int value, unsigned int range) {
 }
 
 string FormatSecs(unsigned secs) {
-  return FormatTimeDelta(TimeDelta::FromSeconds(secs));
+  return FormatTimeDelta(base::Seconds(secs));
 }
 
 string FormatTimeDelta(TimeDelta delta) {
@@ -695,13 +729,13 @@ string FormatTimeDelta(TimeDelta delta) {
 
   // Canonicalize into days, hours, minutes, seconds and microseconds.
   unsigned days = delta.InDays();
-  delta -= TimeDelta::FromDays(days);
+  delta -= base::Days(days);
   unsigned hours = delta.InHours();
-  delta -= TimeDelta::FromHours(hours);
+  delta -= base::Hours(hours);
   unsigned mins = delta.InMinutes();
-  delta -= TimeDelta::FromMinutes(mins);
+  delta -= base::Minutes(mins);
   unsigned secs = delta.InSeconds();
-  delta -= TimeDelta::FromSeconds(secs);
+  delta -= base::Seconds(secs);
   unsigned usecs = delta.InMicroseconds();
 
   if (days)
@@ -972,7 +1006,7 @@ string GetTimeAsString(time_t utime) {
 }
 
 string GetExclusionName(const string& str_to_convert) {
-  return base::NumberToString(base::StringPieceHash()(str_to_convert));
+  return base::NumberToString(GenerateExclusionHash(str_to_convert));
 }
 
 static bool ParseTimestamp(const std::string& str, int64_t* out) {

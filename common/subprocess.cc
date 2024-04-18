@@ -21,15 +21,15 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <iterator>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/posix/eintr_wrapper.h>
-#include <base/stl_util.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
 #include <brillo/secure_blob.h>
@@ -82,7 +82,12 @@ bool LaunchProcess(const vector<string>& cmd,
 
   // Create an environment for the child process with just the required PATHs.
   std::map<string, string> env;
-  for (const char* key : {"LD_LIBRARY_PATH", "PATH"}) {
+  const std::vector<const char*> allowed_envs = {"LD_LIBRARY_PATH",
+                                                 "PATH",
+                                                 "ASAN_OPTIONS",
+                                                 "MSAN_OPTIONS",
+                                                 "UBSAN_OPTIONS"};
+  for (const char* key : allowed_envs) {
     const char* value = getenv(key);
     if (value)
       env.emplace(key, value);
@@ -93,7 +98,7 @@ bool LaunchProcess(const vector<string>& cmd,
   }
   proc->SetCloseUnusedFileDescriptors(true);
   proc->RedirectUsingPipe(STDOUT_FILENO, false);
-  proc->SetPreExecCallback(base::Bind(&SetupChild, env, flags));
+  proc->SetPreExecCallback(base::BindOnce(&SetupChild, env, flags));
 
   LOG(INFO) << "Running \"" << base::JoinString(cmd, " ") << "\"";
   return proc->Start();
@@ -123,7 +128,7 @@ void Subprocess::OnStdoutReady(SubprocessRecord* record) {
     bytes_read = 0;
     bool eof;
     bool ok = utils::ReadAll(
-        record->stdout_fd, buf, base::size(buf), &bytes_read, &eof);
+        record->stdout_fd, buf, std::size(buf), &bytes_read, &eof);
     record->stdout.append(buf, bytes_read);
     if (!ok || eof) {
       // There was either an error or an EOF condition, so we are done watching
@@ -156,7 +161,7 @@ void Subprocess::ChildExitedCallback(const siginfo_t& info) {
     LOG(INFO) << "Subprocess output:\n" << record->stdout;
   }
   if (!record->callback.is_null()) {
-    record->callback.Run(info.si_status, record->stdout);
+    std::move(record->callback).Run(info.si_status, record->stdout);
   }
   // Release and close all the pipes after calling the callback so our
   // redirected pipes are still alive. Releasing the process first makes
@@ -168,16 +173,16 @@ void Subprocess::ChildExitedCallback(const siginfo_t& info) {
   subprocess_records_.erase(pid_record);
 }
 
-pid_t Subprocess::Exec(const vector<string>& cmd,
-                       const ExecCallback& callback) {
-  return ExecFlags(cmd, kRedirectStderrToStdout, {}, callback);
+pid_t Subprocess::Exec(const vector<string>& cmd, ExecCallback callback) {
+  return ExecFlags(cmd, kRedirectStderrToStdout, {}, std::move(callback));
 }
 
 pid_t Subprocess::ExecFlags(const vector<string>& cmd,
                             uint32_t flags,
                             const vector<int>& output_pipes,
-                            const ExecCallback& callback) {
-  unique_ptr<SubprocessRecord> record(new SubprocessRecord(callback));
+                            ExecCallback callback) {
+  unique_ptr<SubprocessRecord> record(
+      new SubprocessRecord(std::move(callback)));
 
   if (!LaunchProcess(cmd, flags, output_pipes, &record->proc)) {
     LOG(ERROR) << "Failed to launch subprocess";
@@ -188,7 +193,8 @@ pid_t Subprocess::ExecFlags(const vector<string>& cmd,
   CHECK(process_reaper_.WatchForChild(
       FROM_HERE,
       pid,
-      base::Bind(&Subprocess::ChildExitedCallback, base::Unretained(this))));
+      base::BindOnce(&Subprocess::ChildExitedCallback,
+                     base::Unretained(this))));
 
   record->stdout_fd = record->proc.GetPipe(STDOUT_FILENO);
   // Capture the subprocess output. Make our end of the pipe non-blocking.

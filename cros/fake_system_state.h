@@ -26,12 +26,15 @@
 #include "metrics/metrics_library_mock.h"
 #include "update_engine/common/fake_boot_control.h"
 #include "update_engine/common/fake_clock.h"
+#include "update_engine/common/fake_cros_healthd.h"
 #include "update_engine/common/fake_hardware.h"
 #include "update_engine/common/fake_prefs.h"
+#include "update_engine/common/mock_call_wrapper.h"
 #include "update_engine/common/mock_metrics_reporter.h"
 #include "update_engine/common/mock_prefs.h"
 #include "update_engine/common/system_state.h"
 #include "update_engine/cros/mock_connection_manager.h"
+#include "update_engine/cros/mock_dlc_utils.h"
 #include "update_engine/cros/mock_omaha_request_params.h"
 #include "update_engine/cros/mock_p2p_manager.h"
 #include "update_engine/cros/mock_payload_state.h"
@@ -78,6 +81,8 @@ class FakeSystemState : public SystemState {
 
   inline HardwareInterface* hardware() override { return hardware_; }
 
+  inline HibernateInterface* hibernate() override { return hibernate_; }
+
   inline MetricsReporterInterface* metrics_reporter() override {
     CHECK(metrics_reporter_ != nullptr);
     return metrics_reporter_;
@@ -113,7 +118,11 @@ class FakeSystemState : public SystemState {
 
   inline DlcServiceInterface* dlcservice() override { return dlcservice_; }
 
+  inline DlcUtilsInterface* dlc_utils() override { return dlc_utils_; }
+
   inline CrosHealthdInterface* cros_healthd() override { return cros_healthd_; }
+
+  inline CallWrapperInterface* call_wrapper() override { return call_wrapper_; }
 
   inline bool system_rebooted() override { return fake_system_rebooted_; }
 
@@ -137,6 +146,10 @@ class FakeSystemState : public SystemState {
 
   inline void set_hardware(HardwareInterface* hardware) {
     hardware_ = hardware ? hardware : &fake_hardware_;
+  }
+
+  inline void set_hibernate(HibernateInterface* hibernate) {
+    hibernate_ = hibernate;
   }
 
   inline void set_metrics_reporter(MetricsReporterInterface* metrics_reporter) {
@@ -184,8 +197,21 @@ class FakeSystemState : public SystemState {
     dlcservice_ = dlcservice;
   }
 
+  inline void set_dlc_utils(DlcUtilsInterface* dlc_utils) {
+    dlc_utils_ = dlc_utils;
+  }
+
   inline void set_cros_healthd(CrosHealthdInterface* cros_healthd) {
-    cros_healthd_ = cros_healthd;
+    cros_healthd_ = (cros_healthd ? cros_healthd : &fake_cros_healthd_);
+  }
+
+  inline void set_call_wrapper(CallWrapperInterface* call_wrapper) {
+    call_wrapper_ = call_wrapper;
+  }
+
+  inline testing::StrictMock<MockCallWrapper>* mock_call_wrapper() {
+    CHECK(call_wrapper_ == &mock_call_wrapper_);
+    return &mock_call_wrapper_;
   }
 
   // Getters for the built-in default implementations. These return the actual
@@ -263,6 +289,11 @@ class FakeSystemState : public SystemState {
     return &fake_update_manager_;
   }
 
+  inline FakeCrosHealthd* fake_cros_healthd() {
+    CHECK(cros_healthd_ == &fake_cros_healthd_);
+    return &fake_cros_healthd_;
+  }
+
  private:
   // Don't allow for direct initialization of this class.
   FakeSystemState();
@@ -274,6 +305,7 @@ class FakeSystemState : public SystemState {
   FakeHardware fake_hardware_;
   FakePrefs fake_prefs_;
   FakePrefs fake_powerwash_safe_prefs_;
+  FakeCrosHealthd fake_cros_healthd_;
 
   testing::NiceMock<MockConnectionManager> mock_connection_manager_;
   testing::NiceMock<MockMetricsReporter> mock_metrics_reporter_;
@@ -284,6 +316,8 @@ class FakeSystemState : public SystemState {
   testing::NiceMock<MockOmahaRequestParams> mock_request_params_;
   testing::NiceMock<MockP2PManager> mock_p2p_manager_;
   testing::NiceMock<MockPowerManager> mock_power_manager_;
+  testing::StrictMock<MockCallWrapper> mock_call_wrapper_;
+  testing::StrictMock<MockDlcUtils> mock_dlc_utils_;
 
   // Pointers to objects that client code can override. They are initialized to
   // the default implementations above.
@@ -291,6 +325,7 @@ class FakeSystemState : public SystemState {
   ClockInterface* clock_;
   ConnectionManagerInterface* connection_manager_;
   HardwareInterface* hardware_;
+  HibernateInterface* hibernate_;
   MetricsReporterInterface* metrics_reporter_;
   PrefsInterface* prefs_;
   PrefsInterface* powerwash_safe_prefs_;
@@ -301,7 +336,9 @@ class FakeSystemState : public SystemState {
   chromeos_update_manager::UpdateManager* update_manager_;
   PowerManagerInterface* power_manager_{&mock_power_manager_};
   DlcServiceInterface* dlcservice_;
-  CrosHealthdInterface* cros_healthd_;
+  CrosHealthdInterface* cros_healthd_{&fake_cros_healthd_};
+  CallWrapperInterface* call_wrapper_;
+  DlcUtilsInterface* dlc_utils_;
 
   // Other object pointers (not preinitialized).
   const policy::DevicePolicy* device_policy_;

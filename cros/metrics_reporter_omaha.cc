@@ -115,6 +115,8 @@ const char kMetricEnterpriseRollbackFailure[] =
     "UpdateEngine.EnterpriseRollback.Failure";
 const char kMetricEnterpriseRollbackSuccess[] =
     "UpdateEngine.EnterpriseRollback.Success";
+extern const char kMetricEnterpriseRollbackBlockedByFSI[] =
+    "UpdateEngine.EnterpriseRollback.BlockedByFSI";
 
 // UpdateEngine.CertificateCheck.* metrics.
 const char kMetricCertificateCheckUpdateCheck[] =
@@ -123,11 +125,13 @@ const char kMetricCertificateCheckDownload[] =
     "UpdateEngine.CertificateCheck.Download";
 
 // UpdateEngine.* metrics.
+const char kMetricEnterpriseUpdateInvalidatedResult[] =
+    "UpdateEngine.EnterpriseUpdateInvalidatedResult";
 const char kMetricFailedUpdateCount[] = "UpdateEngine.FailedUpdateCount";
 const char kMetricInstallDateProvisioningSource[] =
     "UpdateEngine.InstallDateProvisioningSource";
-const char kMetricTimeToRebootMinutes[] = "UpdateEngine.TimeToRebootMinutes";
 const char kMetricInvalidatedUpdate[] = "UpdateEngine.UpdateInvalidated";
+const char kMetricTimeToRebootMinutes[] = "UpdateEngine.TimeToRebootMinutes";
 
 // UpdateEngine.ConsecutiveUpdate.* metrics.
 const char kMetricConsecutiveUpdateCount[] =
@@ -459,11 +463,8 @@ void MetricsReporterOmaha::ReportRollbackMetrics(
 }
 
 void MetricsReporterOmaha::ReportEnterpriseRollbackMetrics(
-    bool success, const string& rollback_version) {
+    const std::string& metric, const string& rollback_version) {
   int value = utils::VersionPrefix(rollback_version);
-  string metric = metrics::kMetricEnterpriseRollbackSuccess;
-  if (!success)
-    metric = metrics::kMetricEnterpriseRollbackFailure;
   metrics_lib_->SendSparseToUMA(metric, value);
 }
 
@@ -509,6 +510,12 @@ void MetricsReporterOmaha::ReportInvalidatedUpdate(bool successful) {
   metrics_lib_->SendBoolToUMA(metric, successful);
 }
 
+void MetricsReporterOmaha::ReportEnterpriseUpdateInvalidatedResult(
+    bool success) {
+  string metric = metrics::kMetricEnterpriseUpdateInvalidatedResult;
+  metrics_lib_->SendBoolToUMA(metric, success);
+}
+
 void MetricsReporterOmaha::ReportInstallDateProvisioningSource(int source,
                                                                int max) {
   metrics_lib_->SendEnumToUMA(metrics::kMetricInstallDateProvisioningSource,
@@ -548,8 +555,7 @@ void MetricsReporterOmaha::ReportFailedConsecutiveUpdate() {
 }
 
 bool MetricsReporterOmaha::WallclockDurationHelper(
-    const std::string& state_variable_key,
-    TimeDelta* out_duration) {
+    const std::string& state_variable_key, TimeDelta* out_duration) {
   bool ret = false;
   Time now = SystemState::Get()->clock()->GetWallclockTime();
   int64_t stored_value;

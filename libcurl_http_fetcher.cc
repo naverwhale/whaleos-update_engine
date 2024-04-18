@@ -22,25 +22,30 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <iterator>
 #include <string>
 
-#include <base/bind.h>
 #include <base/format_macros.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
+#if BASE_VER < 1050813
+#include <base/threading/thread_task_runner_handle.h>
+#else
+#include <base/task/single_thread_task_runner.h>
+#endif
 #if BASE_VER >= 822064
 #include <base/notreached.h>
 #endif
 #include <base/strings/string_split.h>
 #include <base/strings/string_util.h>
 #include <base/strings/stringprintf.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/time/time.h>
 
 #include "update_engine/certificate_checker.h"
 #include "update_engine/common/hardware_interface.h"
 #include "update_engine/common/platform_constants.h"
 
-using base::TimeDelta;
 using brillo::MessageLoop;
 using std::max;
 using std::string;
@@ -52,7 +57,7 @@ namespace chromeos_update_engine {
 
 namespace {
 
-const int kNoNetworkRetrySeconds = 10;
+constexpr base::TimeDelta kNoNetworkRetryTime = base::Seconds(10);
 
 // libcurl's CURLOPT_SOCKOPTFUNCTION callback function. Called after the socket
 // is created but before it is connected. This callback tags the created socket
@@ -70,8 +75,8 @@ int LibcurlHttpFetcher::LibcurlCloseSocketCallback(void* clientp,
                                                    curl_socket_t item) {
   LibcurlHttpFetcher* fetcher = static_cast<LibcurlHttpFetcher*>(clientp);
   // Stop watching the socket before closing it.
-  for (size_t t = 0; t < base::size(fetcher->fd_controller_maps_); ++t) {
-    fetcher->fd_controller_maps_[t].erase(item);
+  for (auto& controller_map : fetcher->fd_controller_maps_) {
+    controller_map.erase(item);
   }
 
   // Documentation for this callback says to return 0 on success or 1 on error.
@@ -321,9 +326,9 @@ void LibcurlHttpFetcher::SetCurlOptionsForFile() {
 void LibcurlHttpFetcher::BeginTransfer(const string& url) {
   CHECK(!transfer_in_progress_);
   url_ = url;
-  auto closure =
-      base::Bind(&LibcurlHttpFetcher::ProxiesResolved, base::Unretained(this));
-  ResolveProxiesForUrl(url_, closure);
+  ResolveProxiesForUrl(url_,
+                       base::BindOnce(&LibcurlHttpFetcher::ProxiesResolved,
+                                      base::Unretained(this)));
 }
 
 void LibcurlHttpFetcher::ProxiesResolved() {
@@ -445,12 +450,16 @@ void LibcurlHttpFetcher::CurlPerformOnce() {
     // When there's no |base::SingleThreadTaskRunner| on current thread, it's
     // not possible to watch file descriptors. Just poll it later. This usually
     // happens if |brillo::FakeMessageLoop| is used.
+#if BASE_VER < 1050813
     if (!base::ThreadTaskRunnerHandle::IsSet()) {
+#else
+    if (!base::SingleThreadTaskRunner::HasCurrentDefault()) {
+#endif
       MessageLoop::current()->PostDelayedTask(
           FROM_HERE,
-          base::Bind(&LibcurlHttpFetcher::CurlPerformOnce,
-                     base::Unretained(this)),
-          TimeDelta::FromSeconds(1));
+          base::BindOnce(&LibcurlHttpFetcher::CurlPerformOnce,
+                         base::Unretained(this)),
+          base::Seconds(1));
       return;
     }
     SetupMessageLoopSources();
@@ -502,9 +511,9 @@ void LibcurlHttpFetcher::CurlPerformOnce() {
     no_network_retry_count_++;
     retry_task_id_ = MessageLoop::current()->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&LibcurlHttpFetcher::RetryTimeoutCallback,
-                   base::Unretained(this)),
-        TimeDelta::FromSeconds(kNoNetworkRetrySeconds));
+        base::BindOnce(&LibcurlHttpFetcher::RetryTimeoutCallback,
+                       base::Unretained(this)),
+        kNoNetworkRetryTime);
     LOG(INFO) << "No HTTP response, retry " << no_network_retry_count_;
   } else if ((!sent_byte_ && !IsHttpResponseSuccess()) ||
              IsHttpResponseError()) {
@@ -528,8 +537,8 @@ void LibcurlHttpFetcher::CurlPerformOnce() {
       LOG(INFO) << "Retrying with next proxy setting";
       retry_task_id_ = MessageLoop::current()->PostTask(
           FROM_HERE,
-          base::Bind(&LibcurlHttpFetcher::RetryTimeoutCallback,
-                     base::Unretained(this)));
+          base::BindOnce(&LibcurlHttpFetcher::RetryTimeoutCallback,
+                         base::Unretained(this)));
     } else {
       // Out of proxies. Give up.
       LOG(INFO) << "No further proxies, indicating transfer complete";
@@ -538,12 +547,25 @@ void LibcurlHttpFetcher::CurlPerformOnce() {
       return;
     }
   } else if ((transfer_size_ >= 0) && (bytes_downloaded_ < transfer_size_)) {
-    if (!ignore_failure_)
+    // If the response happens to be partial data, don't increase the retry
+    // count, as we should retry without treating it as an error.
+    bool partial_content = IsHttpResponseSuccessPartialContent();
+    if (!ignore_failure_ && !partial_content)
       retry_count_++;
-    LOG(INFO) << "Transfer interrupted after downloading " << bytes_downloaded_
-              << " of " << transfer_size_ << " bytes. "
-              << transfer_size_ - bytes_downloaded_ << " bytes remaining "
-              << "after " << retry_count_ << " attempt(s)";
+
+    auto bytes_left = transfer_size_ - bytes_downloaded_;
+    if (partial_content) {
+      LOG(INFO) << "Transfer partial content after downloading "
+                << bytes_downloaded_ << " of " << transfer_size_ << " bytes. "
+                << bytes_left << " bytes remaining as partial content returned "
+                << "by server. Not incrementing retry count, still at "
+                << retry_count_ << " attempt(s)";
+    } else {
+      LOG(INFO) << "Transfer interrupted after downloading "
+                << bytes_downloaded_ << " of " << transfer_size_ << " bytes. "
+                << bytes_left << " bytes remaining "
+                << "after " << retry_count_ << " attempt(s)";
+    }
 
     if (retry_count_ > max_retry_count_) {
       LOG(INFO) << "Reached max attempts (" << retry_count_ << ")";
@@ -555,9 +577,9 @@ void LibcurlHttpFetcher::CurlPerformOnce() {
     LOG(INFO) << "Restarting transfer to download the remaining bytes";
     retry_task_id_ = MessageLoop::current()->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&LibcurlHttpFetcher::RetryTimeoutCallback,
-                   base::Unretained(this)),
-        TimeDelta::FromSeconds(retry_seconds_));
+        base::BindOnce(&LibcurlHttpFetcher::RetryTimeoutCallback,
+                       base::Unretained(this)),
+        retry_time_);
   } else {
     LOG(INFO) << "Transfer completed (" << http_response_code_ << "), "
               << bytes_downloaded_ << " bytes downloaded";
@@ -673,9 +695,9 @@ void LibcurlHttpFetcher::SetupMessageLoopSources() {
 
   // We should iterate through all file descriptors up to libcurl's fd_max or
   // the highest one we're tracking, whichever is larger.
-  for (size_t t = 0; t < base::size(fd_controller_maps_); ++t) {
-    if (!fd_controller_maps_[t].empty())
-      fd_max = max(fd_max, fd_controller_maps_[t].rbegin()->first);
+  for (const auto& map : fd_controller_maps_) {
+    if (!map.empty())
+      fd_max = max(fd_max, map.rbegin()->first);
   }
 
   // For each fd, if we're not tracking it, track it. If we are tracking it, but
@@ -691,7 +713,7 @@ void LibcurlHttpFetcher::SetupMessageLoopSources() {
         is_exc || (FD_ISSET(fd, &fd_write) != 0)  // track 1 -- write
     };
 
-    for (size_t t = 0; t < base::size(fd_controller_maps_); ++t) {
+    for (size_t t = 0; t < std::size(fd_controller_maps_); ++t) {
       bool tracked =
           fd_controller_maps_[t].find(fd) != fd_controller_maps_[t].end();
 
@@ -705,21 +727,29 @@ void LibcurlHttpFetcher::SetupMessageLoopSources() {
       if (tracked)
         continue;
 
-      // Track a new fd.
+      // Track a new fd. Instead of watching the original fd we watch a
+      // duplicate so we can ensure the fd outlives the file descriptor watcher.
       switch (t) {
-        case 0:  // Read
-          fd_controller_maps_[t][fd] =
+        case 0: {  // Read
+          int watched_fd = HANDLE_EINTR(dup(fd));
+          fd_controller_maps_[t][fd] = WatchedFd{
+              base::ScopedFD(watched_fd),
               base::FileDescriptorWatcher::WatchReadable(
-                  fd,
+                  watched_fd,
                   base::BindRepeating(&LibcurlHttpFetcher::CurlPerformOnce,
-                                      base::Unretained(this)));
+                                      base::Unretained(this)))};
           break;
-        case 1:  // Write
-          fd_controller_maps_[t][fd] =
+        }
+        case 1: {  // Write
+          int watched_fd = HANDLE_EINTR(dup(fd));
+          fd_controller_maps_[t][fd] = WatchedFd{
+              base::ScopedFD(watched_fd),
               base::FileDescriptorWatcher::WatchWritable(
-                  fd,
+                  watched_fd,
                   base::BindRepeating(&LibcurlHttpFetcher::CurlPerformOnce,
-                                      base::Unretained(this)));
+                                      base::Unretained(this)))};
+          break;
+        }
       }
       static int io_counter = 0;
       io_counter++;
@@ -731,12 +761,13 @@ void LibcurlHttpFetcher::SetupMessageLoopSources() {
 
   // Set up a timeout callback for libcurl.
   if (timeout_id_ == MessageLoop::kTaskIdNull) {
-    VLOG(1) << "Setting up timeout source: " << idle_seconds_ << " seconds.";
+    VLOG(1) << "Setting up timeout source: " << idle_time_.InSeconds()
+            << " seconds.";
     timeout_id_ = MessageLoop::current()->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&LibcurlHttpFetcher::TimeoutCallback,
-                   base::Unretained(this)),
-        TimeDelta::FromSeconds(idle_seconds_));
+        base::BindOnce(&LibcurlHttpFetcher::TimeoutCallback,
+                       base::Unretained(this)),
+        idle_time_);
   }
 }
 
@@ -756,8 +787,9 @@ void LibcurlHttpFetcher::TimeoutCallback() {
   // be called back.
   timeout_id_ = MessageLoop::current()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&LibcurlHttpFetcher::TimeoutCallback, base::Unretained(this)),
-      TimeDelta::FromSeconds(idle_seconds_));
+      base::BindOnce(&LibcurlHttpFetcher::TimeoutCallback,
+                     base::Unretained(this)),
+      idle_time_);
 
   // CurlPerformOnce() may call CleanUp(), so we need to schedule our callback
   // first, since it could be canceled by this call.
@@ -772,8 +804,8 @@ void LibcurlHttpFetcher::CleanUp() {
   MessageLoop::current()->CancelTask(timeout_id_);
   timeout_id_ = MessageLoop::kTaskIdNull;
 
-  for (size_t t = 0; t < base::size(fd_controller_maps_); ++t) {
-    fd_controller_maps_[t].clear();
+  for (auto& map : fd_controller_maps_) {
+    map.clear();
   }
 
   if (curl_http_headers_) {

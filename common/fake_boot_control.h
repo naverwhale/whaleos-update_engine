@@ -20,9 +20,11 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <base/time/time.h>
+#include <brillo/blkdev_utils/lvm.h>
 
 #include "update_engine/common/boot_control_interface.h"
 #include "update_engine/common/dynamic_partition_control_stub.h"
@@ -46,6 +48,9 @@ class FakeBootControl : public BootControlInterface {
   unsigned int GetNumSlots() const override { return num_slots_; }
   BootControlInterface::Slot GetCurrentSlot() const override {
     return current_slot_;
+  }
+  BootControlInterface::Slot GetFirstInactiveSlot() const override {
+    return first_inactive_slot_;
   }
 
   bool GetPartitionDevice(const std::string& partition_name,
@@ -71,6 +76,16 @@ class FakeBootControl : public BootControlInterface {
     return GetPartitionDevice(partition_name, slot, false, device, nullptr);
   }
 
+  bool GetErrorCounter(Slot slot, int* error_counter) const override {
+    *error_counter = error_counter_;
+    return true;
+  }
+
+  bool SetErrorCounter(Slot slot, int error_counter) override {
+    error_counter_ = error_counter;
+    return true;
+  }
+
   bool IsSlotBootable(BootControlInterface::Slot slot) const override {
     return slot < num_slots_ && is_bootable_[slot];
   }
@@ -89,11 +104,12 @@ class FakeBootControl : public BootControlInterface {
     return true;
   }
 
-  bool MarkBootSuccessfulAsync(base::Callback<void(bool)> callback) override {
+  bool MarkBootSuccessfulAsync(
+      base::OnceCallback<void(bool)> callback) override {
     // We run the callback directly from here to avoid having to setup a message
     // loop in the test environment.
     is_marked_successful_[GetCurrentSlot()] = true;
-    callback.Run(true);
+    std::move(callback).Run(true);
     return true;
   }
 
@@ -110,6 +126,11 @@ class FakeBootControl : public BootControlInterface {
   }
 
   void SetCurrentSlot(BootControlInterface::Slot slot) { current_slot_ = slot; }
+  void SetFirstInactiveSlot(BootControlInterface::Slot slot) {
+    first_inactive_slot_ = slot;
+  }
+
+  base::FilePath GetBootDevicePath() const override { return {}; }
 
   void SetPartitionDevice(const std::string& partition_name,
                           BootControlInterface::Slot slot,
@@ -122,6 +143,8 @@ class FakeBootControl : public BootControlInterface {
     DCHECK(slot < num_slots_);
     is_bootable_[slot] = bootable;
   }
+
+  void SetErrorCounter(int error_counter) { error_counter_ = error_counter; }
 
   DynamicPartitionControlInterface* GetDynamicPartitionControl() override {
     return dynamic_partition_control_.get();
@@ -141,15 +164,24 @@ class FakeBootControl : public BootControlInterface {
   }
   bool SupportsMiniOSPartitions() override { return supports_minios_; }
 
+  bool IsLvmStackEnabled(brillo::LogicalVolumeManager* lvm) override {
+    return is_lvm_stack_enabled_;
+  }
+  void SetIsLvmStackEnabled(bool enabled) { is_lvm_stack_enabled_ = enabled; }
+
  private:
   BootControlInterface::Slot num_slots_{2};
   BootControlInterface::Slot current_slot_{0};
+  BootControlInterface::Slot first_inactive_slot_{0};
 
   std::vector<bool> is_bootable_;
   std::vector<bool> is_marked_successful_;
   std::vector<std::map<std::string, std::string>> devices_;
 
   bool supports_minios_{false};
+  int error_counter_ = 0;
+
+  bool is_lvm_stack_enabled_{false};
 
   std::unique_ptr<DynamicPartitionControlInterface> dynamic_partition_control_;
 };

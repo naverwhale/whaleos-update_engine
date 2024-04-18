@@ -122,12 +122,16 @@ metrics::AttemptResult GetAttemptResult(ErrorCode code) {
     case ErrorCode::kFirstActiveOmahaPingSentPersistenceError:
     case ErrorCode::kPackageExcludedFromUpdate:
     case ErrorCode::kInvalidateLastUpdate:
+    case ErrorCode::kOmahaUpdateIgnoredOverMetered:
+    case ErrorCode::kScaledInstallationError:
       return metrics::AttemptResult::kInternalError;
 
     case ErrorCode::kOmahaUpdateDeferredPerPolicy:
     case ErrorCode::kNonCriticalUpdateInOOBE:
     case ErrorCode::kDownloadCancelledPerPolicy:
+    case ErrorCode::kNonCriticalUpdateEnrollmentRecovery:
     case ErrorCode::kRepeatedFpFromOmahaError:
+    case ErrorCode::kUpdateIgnoredRollbackVersion:
       return metrics::AttemptResult::kUpdateSkipped;
 
     // Special flags. These can't happen (we mask them out above) but
@@ -248,6 +252,10 @@ metrics::DownloadErrorCode GetDownloadErrorCode(ErrorCode code) {
     case ErrorCode::kDownloadCancelledPerPolicy:
     case ErrorCode::kRepeatedFpFromOmahaError:
     case ErrorCode::kInvalidateLastUpdate:
+    case ErrorCode::kOmahaUpdateIgnoredOverMetered:
+    case ErrorCode::kScaledInstallationError:
+    case ErrorCode::kNonCriticalUpdateEnrollmentRecovery:
+    case ErrorCode::kUpdateIgnoredRollbackVersion:
       break;
 
     // Special flags. These can't happen (we mask them out above) but
@@ -267,8 +275,7 @@ metrics::DownloadErrorCode GetDownloadErrorCode(ErrorCode code) {
   return metrics::DownloadErrorCode::kInputMalformed;
 }
 
-metrics::ConnectionType GetConnectionType(ConnectionType type,
-                                          ConnectionTethering tethering) {
+metrics::ConnectionType GetConnectionType(ConnectionType type, bool metered) {
   switch (type) {
     case ConnectionType::kUnknown:
       return metrics::ConnectionType::kUnknown;
@@ -277,24 +284,20 @@ metrics::ConnectionType GetConnectionType(ConnectionType type,
       return metrics::ConnectionType::kDisconnected;
 
     case ConnectionType::kEthernet:
-      if (tethering == ConnectionTethering::kConfirmed)
-        return metrics::ConnectionType::kTetheredEthernet;
-      else
-        return metrics::ConnectionType::kEthernet;
+      return metrics::ConnectionType::kEthernet;
 
     case ConnectionType::kWifi:
-      if (tethering == ConnectionTethering::kConfirmed)
-        return metrics::ConnectionType::kTetheredWifi;
-      else
-        return metrics::ConnectionType::kWifi;
+      return metered ? metrics::ConnectionType::kMeteredWifi
+                     : metrics::ConnectionType::kWifi;
 
     case ConnectionType::kCellular:
-      return metrics::ConnectionType::kCellular;
+      return metered ? metrics::ConnectionType::kCellular
+                     : metrics::ConnectionType::kUnmeteredCellular;
   }
 
   LOG(ERROR) << "Unexpected network connection type: type="
              << static_cast<int>(type)
-             << ", tethering=" << static_cast<int>(tethering);
+             << ", metered=" << static_cast<int>(metered);
 
   return metrics::ConnectionType::kUnknown;
 }

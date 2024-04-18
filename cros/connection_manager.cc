@@ -51,18 +51,7 @@ std::unique_ptr<ConnectionManagerInterface> CreateConnectionManager() {
 ConnectionManager::ConnectionManager(ShillProxyInterface* shill_proxy)
     : shill_proxy_(shill_proxy) {}
 
-bool ConnectionManager::IsUpdateAllowedOver(
-    ConnectionType type, ConnectionTethering tethering) const {
-  if (type != ConnectionType::kCellular) {
-    if (tethering != ConnectionTethering::kConfirmed) {
-      return true;
-    }
-
-    // Treat this connection as if it is a cellular connection.
-    LOG(INFO)
-        << "Current connection is confirmed tethered, using Cellular setting.";
-  }
-
+bool ConnectionManager::IsUpdateAllowedOverMetered() const {
   const policy::DevicePolicy* device_policy =
       SystemState::Get()->device_policy();
 
@@ -80,8 +69,8 @@ bool ConnectionManager::IsUpdateAllowedOver(
     // Device policy fails to be loaded (possibly due to guest account). We
     // do not check the local user setting here, which should be checked by
     // |OmahaRequestAction| during checking for update.
-    LOG(INFO) << "Allowing updates over cellular as device policy fails to be "
-                 "loaded.";
+    LOG(INFO) << "Allowing updates over metered network as device policy fails "
+                 "to be loaded.";
     return true;
   }
 
@@ -91,19 +80,19 @@ bool ConnectionManager::IsUpdateAllowedOver(
 
     // TODO(crbug.com/1054279): Use base::Contains after uprev to r680000.
     if (allowed_types.find(shill::kTypeCellular) == allowed_types.end()) {
-      LOG(INFO) << "Disabling updates over cellular connection as it's not "
-                   "allowed in the device policy.";
+      LOG(INFO) << "Disabling updates over metered network as it's not allowed "
+                   "in the device policy.";
       return false;
     }
 
-    LOG(INFO) << "Allowing updates over cellular per device policy.";
+    LOG(INFO) << "Allowing updates over metered network per device policy.";
     return true;
   }
 
   // If there's no update setting in the device policy, we do not check
   // the local user setting here, which should be checked by
   // |OmahaRequestAction| during checking for update.
-  LOG(INFO) << "Allowing updates over cellular as device policy does "
+  LOG(INFO) << "Allowing updates over metered network as device policy does "
                "not include update setting.";
   return true;
 }
@@ -124,8 +113,8 @@ bool ConnectionManager::IsAllowedConnectionTypesForUpdateSet() const {
   return true;
 }
 
-bool ConnectionManager::GetConnectionProperties(
-    ConnectionType* out_type, ConnectionTethering* out_tethering) {
+bool ConnectionManager::GetConnectionProperties(ConnectionType* out_type,
+                                                bool* out_metered) {
   dbus::ObjectPath default_service_path;
   TEST_AND_RETURN_FALSE(GetDefaultServicePath(&default_service_path));
   if (!default_service_path.IsValid())
@@ -133,11 +122,11 @@ bool ConnectionManager::GetConnectionProperties(
   // Shill uses the "/" service path to indicate that it is not connected.
   if (default_service_path.value() == "/") {
     *out_type = ConnectionType::kDisconnected;
-    *out_tethering = ConnectionTethering::kUnknown;
+    *out_metered = false;
     return true;
   }
   TEST_AND_RETURN_FALSE(
-      GetServicePathProperties(default_service_path, out_type, out_tethering));
+      GetServicePathProperties(default_service_path, out_type, out_metered));
   return true;
 }
 
@@ -158,10 +147,9 @@ bool ConnectionManager::GetDefaultServicePath(dbus::ObjectPath* out_path) {
   return out_path->IsValid();
 }
 
-bool ConnectionManager::GetServicePathProperties(
-    const dbus::ObjectPath& path,
-    ConnectionType* out_type,
-    ConnectionTethering* out_tethering) {
+bool ConnectionManager::GetServicePathProperties(const dbus::ObjectPath& path,
+                                                 ConnectionType* out_type,
+                                                 bool* out_metered) {
   // We create and dispose the ServiceProxyInterface on every request.
   std::unique_ptr<ServiceProxyInterface> service =
       shill_proxy_->GetServiceForPath(path);
@@ -170,16 +158,13 @@ bool ConnectionManager::GetServicePathProperties(
   brillo::ErrorPtr error;
   TEST_AND_RETURN_FALSE(service->GetProperties(&properties, &error));
 
-  // Populate the out_tethering.
-  const auto& prop_tethering = properties.find(shill::kTetheringProperty);
-  if (prop_tethering == properties.end()) {
-    // Set to Unknown if not present.
-    *out_tethering = ConnectionTethering::kUnknown;
+  // Populate the out_metered property.
+  const auto& prop_metered = properties.find(shill::kMeteredProperty);
+  if (prop_metered == properties.end() ||
+      !prop_metered->second.IsTypeCompatible<bool>()) {
+    *out_metered = false;
   } else {
-    // If the property doesn't contain a string value, the empty string will
-    // become kUnknown.
-    *out_tethering = connection_utils::ParseConnectionTethering(
-        prop_tethering->second.TryGet<string>());
+    *out_metered = prop_metered->second.Get<bool>();
   }
 
   // Populate the out_type property.

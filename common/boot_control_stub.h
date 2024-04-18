@@ -43,6 +43,8 @@ class BootControlStub : public BootControlInterface {
   // BootControlInterface overrides.
   unsigned int GetNumSlots() const override;
   BootControlInterface::Slot GetCurrentSlot() const override;
+  BootControlInterface::Slot GetFirstInactiveSlot() const override;
+  base::FilePath GetBootDevicePath() const override;
   bool GetPartitionDevice(const std::string& partition_name,
                           Slot slot,
                           bool not_in_payload,
@@ -51,11 +53,14 @@ class BootControlStub : public BootControlInterface {
   bool GetPartitionDevice(const std::string& partition_name,
                           BootControlInterface::Slot slot,
                           std::string* device) const override;
+  bool GetErrorCounter(Slot slot, int* error_counter) const override;
+  bool SetErrorCounter(Slot slot, int error_counter) override;
   bool IsSlotBootable(BootControlInterface::Slot slot) const override;
   bool MarkSlotUnbootable(BootControlInterface::Slot slot) override;
   bool SetActiveBootSlot(BootControlInterface::Slot slot) override;
   bool MarkBootSuccessful() override;
-  bool MarkBootSuccessfulAsync(base::Callback<void(bool)> callback) override;
+  bool MarkBootSuccessfulAsync(
+      base::OnceCallback<void(bool)> callback) override;
   bool IsSlotMarkedSuccessful(BootControlInterface::Slot slot) const override;
   DynamicPartitionControlInterface* GetDynamicPartitionControl() override;
   bool GetMiniOSKernelConfig(std::string* configs) override;
@@ -63,6 +68,7 @@ class BootControlStub : public BootControlInterface {
                         std::string* value) override;
   std::string GetMiniOSPartitionName() override;
   bool SupportsMiniOSPartitions() override;
+  bool IsLvmStackEnabled(brillo::LogicalVolumeManager* lvm) override;
 
  private:
   std::unique_ptr<DynamicPartitionControlInterface> dynamic_partition_control_;

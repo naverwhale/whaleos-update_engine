@@ -21,7 +21,7 @@
 #include <algorithm>
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/strings/stringprintf.h>
 #include <base/time/time.h>
 #include <update_engine/dbus-constants.h>
@@ -299,12 +299,8 @@ class BooleanPrefVariable
     : public AsyncCopyVariable<bool>,
       public chromeos_update_engine::PrefsInterface::ObserverInterface {
  public:
-  BooleanPrefVariable(const string& name,
-                      const char* key,
-                      bool default_val)
-      : AsyncCopyVariable<bool>(name),
-        key_(key),
-        default_val_(default_val) {
+  BooleanPrefVariable(const string& name, const char* key, bool default_val)
+      : AsyncCopyVariable<bool>(name), key_(key), default_val_(default_val) {
     SystemState::Get()->prefs()->AddObserver(key, this);
     OnPrefSet(key);
   }
@@ -384,9 +380,10 @@ class ForcedUpdateRequestedVariable
       : UpdaterVariableBase<UpdateRequestStatus>::UpdaterVariableBase(
             name, kVariableModeAsync) {
     SystemState::Get()->update_attempter()->set_forced_update_pending_callback(
-        new base::Callback<void(bool, bool)>(  // NOLINT(readability/function)
-            base::Bind(&ForcedUpdateRequestedVariable::Reset,
-                       base::Unretained(this))));
+        new base::RepeatingCallback<void(
+            bool, bool)>(  // NOLINT(readability/function)
+            base::BindRepeating(&ForcedUpdateRequestedVariable::Reset,
+                                base::Unretained(this))));
   }
   ForcedUpdateRequestedVariable(const ForcedUpdateRequestedVariable&) = delete;
   ForcedUpdateRequestedVariable& operator=(
@@ -485,5 +482,9 @@ RealUpdaterProvider::RealUpdaterProvider()
           new ForcedUpdateRequestedVariable("forced_update_requested")),
       var_test_update_check_interval_timeout_(
           new TestUpdateCheckIntervalTimeoutVariable(
-              "test_update_check_interval_timeout")) {}
+              "test_update_check_interval_timeout")),
+      var_consumer_auto_update_disabled_(new BooleanPrefVariable(
+          "consumer_auto_update_disabled",
+          chromeos_update_engine::kPrefsConsumerAutoUpdateDisabled,
+          false)) {}
 }  // namespace chromeos_update_manager

@@ -25,6 +25,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -71,10 +72,12 @@ using std::vector;
 
 namespace chromeos_update_engine {
 const unsigned DeltaPerformer::kProgressLogMaxChunks = 10;
-const unsigned DeltaPerformer::kProgressLogTimeoutSeconds = 30;
+const base::TimeDelta DeltaPerformer::kProgressLogTimeoutTime =
+    base::Seconds(30);
 const unsigned DeltaPerformer::kProgressDownloadWeight = 50;
 const unsigned DeltaPerformer::kProgressOperationsWeight = 50;
-const uint64_t DeltaPerformer::kCheckpointFrequencySeconds = 1;
+const base::TimeDelta DeltaPerformer::kCheckpointFrequencyTime =
+    base::Seconds(1);
 
 namespace {
 const int kUpdateStateOperationInvalid = -1;
@@ -538,8 +541,8 @@ MetadataParseResult DeltaPerformer::ParsePayloadMetadata(
   LOCAL_HISTOGRAM_CUSTOM_TIMES(                                              \
       "UpdateEngine.DownloadAction.InstallOperation::" _op_name ".Duration", \
       (base::TimeTicks::Now() - _start_time),                                \
-      base::TimeDelta::FromMilliseconds(10),                                 \
-      base::TimeDelta::FromMinutes(5),                                       \
+      base::Milliseconds(10),                                                \
+      base::Minutes(5),                                                      \
       20);
 
 // Wrapper around write. Returns true if all requested bytes
@@ -909,8 +912,8 @@ bool DeltaPerformer::PreparePartitionsForUpdate(uint64_t* required_size) {
   // kPrefsUpdateCheckResponseHash to ensure hash of payload that space is
   // preallocated for is the same as the hash of payload being applied.
   string update_check_response_hash;
-  ignore_result(prefs_->GetString(kPrefsUpdateCheckResponseHash,
-                                  &update_check_response_hash));
+  std::ignore = prefs_->GetString(kPrefsUpdateCheckResponseHash,
+                                  &update_check_response_hash);
   return PreparePartitionsForUpdate(prefs_,
                                     boot_control_,
                                     install_plan_->target_slot,
@@ -927,8 +930,8 @@ bool DeltaPerformer::PreparePartitionsForUpdate(
     const std::string& update_check_response_hash,
     uint64_t* required_size) {
   string last_hash;
-  ignore_result(
-      prefs->GetString(kPrefsDynamicPartitionMetadataUpdated, &last_hash));
+  std::ignore =
+      prefs->GetString(kPrefsDynamicPartitionMetadataUpdated, &last_hash);
 
   bool is_resume = !update_check_response_hash.empty() &&
                    last_hash == update_check_response_hash;
@@ -1514,6 +1517,11 @@ bool DeltaPerformer::ExtractSignatureMessage() {
 bool DeltaPerformer::GetPublicKey(string* out_public_key) {
   out_public_key->clear();
 
+  if (!install_plan_->signature_checks_mandatory) {
+    LOG(INFO) << "Skipping get public key -- signature checks not required.";
+    return true;
+  }
+
   if (utils::FileExists(public_key_path_.c_str())) {
     LOG(INFO) << "Verifying using public key: " << public_key_path_;
     return utils::ReadFile(public_key_path_, out_public_key);
@@ -1802,7 +1810,7 @@ ErrorCode DeltaPerformer::VerifyPayload(
   // NOLINTNEXTLINE(whitespace/braces)
   auto [payload_verifier, perform_verification] = CreatePayloadVerifier();
   if (!perform_verification) {
-    LOG(WARNING) << "Not verifying signed delta payload -- missing public key.";
+    LOG(WARNING) << "Not verifying payload -- verification is disabled.";
     return ErrorCode::kSuccess;
   }
   if (!payload_verifier) {

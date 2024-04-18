@@ -42,21 +42,21 @@ class DBusUpdateEngineService
   virtual ~DBusUpdateEngineService() = default;
 
   // Implementation of org::chromium::UpdateEngineInterfaceInterface.
-  bool AttemptUpdate(brillo::ErrorPtr* error,
-                     const std::string& in_app_version,
-                     const std::string& in_omaha_url) override;
-
   bool Update(brillo::ErrorPtr* error,
               const update_engine::UpdateParams& in_update_params) override;
 
-  bool AttemptUpdateWithFlags(brillo::ErrorPtr* error,
-                              const std::string& in_app_version,
-                              const std::string& in_omaha_url,
-                              int32_t in_flags_as_int) override;
+  bool ApplyDeferredUpdate(brillo::ErrorPtr* error) override;
+
+  bool ApplyDeferredUpdateAdvanced(
+      brillo::ErrorPtr* error,
+      const update_engine::ApplyUpdateConfig& config) override;
 
   bool AttemptInstall(brillo::ErrorPtr* error,
                       const std::string& in_omaha_url,
                       const std::vector<std::string>& dlc_ids) override;
+
+  bool Install(brillo::ErrorPtr* err,
+               const update_engine::InstallParams& install_params) override;
 
   bool AttemptRollback(brillo::ErrorPtr* error, bool in_powerwash) override;
 
@@ -75,10 +75,14 @@ class DBusUpdateEngineService
                          bool is_active,
                          const std::string& dlc_id) override;
 
-  // Similar to Above, but returns a protobuffer instead. In the future it will
-  // have more features and is easily extendable.
+  // Returns |StatusResult| as it is defined in update_engine.proto.
   bool GetStatusAdvanced(brillo::ErrorPtr* error,
                          update_engine::StatusResult* out_status) override;
+
+  // Overrides the current update status. |update_status| should represent one
+  // of the values of |Operation| in update_engine.proto. Only used for
+  // testing.
+  bool SetStatus(brillo::ErrorPtr* error, int32_t update_status) override;
 
   // Reboots the device if an update is applied and a reboot is required.
   bool RebootIfNeeded(brillo::ErrorPtr* error) override;
@@ -144,6 +148,12 @@ class DBusUpdateEngineService
                      const std::string& feature,
                      bool enable) override;
 
+  // Given the value of a feature, will return whether or not the feature is
+  // enabled. Otherwise, this method returns with an error.
+  bool IsFeatureEnabled(brillo::ErrorPtr* error,
+                        const std::string& feature,
+                        bool* out_enabled) override;
+
   // Returns the duration since the last successful update, as the
   // duration on the wallclock. Returns an error if the device has not
   // updated.
@@ -181,7 +191,7 @@ class UpdateEngineAdaptor : public org::chromium::UpdateEngineInterfaceAdaptor,
   // Register the DBus object with the update engine service asynchronously.
   // Calls |copmletion_callback| when done passing a boolean indicating if the
   // registration succeeded.
-  void RegisterAsync(const base::Callback<void(bool)>& completion_callback);
+  void RegisterAsync(base::OnceCallback<void(bool)> completion_callback);
 
   // Takes ownership of the well-known DBus name and returns whether it
   // succeeded.

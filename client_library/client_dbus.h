@@ -22,7 +22,6 @@
 #include <string>
 #include <vector>
 
-#include <base/macros.h>
 #include <update_engine/proto_bindings/update_engine.pb.h>
 
 #include "update_engine/client_library/include/update_engine/client.h"
@@ -43,12 +42,17 @@ class DBusUpdateEngineClient : public UpdateEngineClient {
 
   bool Update(const update_engine::UpdateParams& update_params) override;
 
+  bool ApplyDeferredUpdate() override;
+
   bool AttemptInstall(const std::string& omaha_url,
                       const std::vector<std::string>& dlc_ids) override;
+
+  bool Install(const update_engine::InstallParams& install_params) override;
 
   bool SetDlcActiveValue(bool is_active, const std::string& dlc_id) override;
 
   bool GetStatus(UpdateEngineStatus* out_status) const override;
+  bool SetStatus(UpdateStatus update_status) const override;
 
   bool SetCohortHint(const std::string& cohort_hint) override;
   bool GetCohortHint(std::string* cohort_hint) const override;
@@ -77,6 +81,7 @@ class DBusUpdateEngineClient : public UpdateEngineClient {
   bool GetChannel(std::string* out_channel) const override;
 
   bool ToggleFeature(const std::string& feature, bool enable) override;
+  bool IsFeatureEnabled(const std::string& feature, bool* out_enabled) override;
 
   bool RegisterStatusUpdateHandler(StatusUpdateHandler* handler) override;
   bool UnregisterStatusUpdateHandler(StatusUpdateHandler* handler) override;

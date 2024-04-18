@@ -24,23 +24,25 @@
 #include <vector>
 
 #include <base/check.h>
+#include <base/files/scoped_file.h>
 #include <base/logging.h>
-#include <base/synchronization/waitable_event.h>
-#include <brillo/dbus/dbus_method_invoker.h>
-#include <brillo/dbus/file_descriptor.h>
-#include <dbus/bus.h>
-#include <dbus/cros_healthd/dbus-constants.h>
-#include <dbus/message.h>
+#include <base/task/single_thread_task_runner.h>
+#include <base/time/time.h>
+#include <chromeos/mojo/service_constants.h>
+#include <mojo/public/cpp/bindings/callback_helpers.h>
 #include <mojo/public/cpp/platform/platform_channel.h>
 #include <mojo/public/cpp/system/invitation.h>
-
-#include "update_engine/cros/dbus_connection.h"
-
-using chromeos::cros_healthd::mojom::ProbeCategoryEnum;
+#include <mojo_service_manager/lib/connect.h>
 
 namespace chromeos_update_engine {
 
 namespace {
+
+using ::ash::cros_healthd::mojom::ProbeCategoryEnum;
+
+// The timeout for connecting to the cros_healthd. This should not happen in the
+// normal case.
+constexpr base::TimeDelta kCrosHealthdConnectingTimeout = base::Minutes(3);
 
 #define SET_MOJO_VALUE(x) \
   { TelemetryCategoryEnum::x, ProbeCategoryEnum::x }
@@ -56,14 +58,13 @@ static const std::unordered_map<TelemetryCategoryEnum, ProbeCategoryEnum>
         SET_MOJO_VALUE(kStatefulPartition),
         SET_MOJO_VALUE(kBluetooth),
         SET_MOJO_VALUE(kSystem),
-        SET_MOJO_VALUE(kSystem2),
         SET_MOJO_VALUE(kNetwork),
         SET_MOJO_VALUE(kAudio),
         SET_MOJO_VALUE(kBootPerformance),
         SET_MOJO_VALUE(kBus),
     };
 
-void PrintError(const chromeos::cros_healthd::mojom::ProbeErrorPtr& error,
+void PrintError(const ash::cros_healthd::mojom::ProbeErrorPtr& error,
                 std::string info) {
   LOG(ERROR) << "Failed to get " << info << ","
              << " error_type=" << error->type << " error_msg=" << error->msg;
@@ -72,16 +73,46 @@ void PrintError(const chromeos::cros_healthd::mojom::ProbeErrorPtr& error,
 }  // namespace
 
 std::unique_ptr<CrosHealthdInterface> CreateCrosHealthd() {
-  return std::make_unique<CrosHealthd>();
+  auto cros_healthd = std::make_unique<CrosHealthd>();
+  // Call mojo bootstrap, instead of in constructor as testing/mocks don't
+  // require the `BootstrapMojo()` call.
+  cros_healthd->BootstrapMojo();
+  return cros_healthd;
 }
 
-bool CrosHealthd::Init() {
+void CrosHealthd::BootstrapMojo() {
+  // TODO(b/264832802): Move these initialization to a new interface.
+  // These operations (`mojo::core::Init()` and connecting to mojo service
+  // manager) could be done in each process only once. If we want to add other
+  // mojo services, we must reuse these mojo initiailizations.
   mojo::core::Init();
   ipc_support_ = std::make_unique<mojo::core::ScopedIPCSupport>(
-      base::ThreadTaskRunnerHandle::Get() /* io_thread_task_runner */,
+      base::SingleThreadTaskRunner::
+          GetCurrentDefault() /* io_thread_task_runner */,
       mojo::core::ScopedIPCSupport::ShutdownPolicy::
           CLEAN /* blocking shutdown */);
-  return BootstrapMojo();
+  auto pending_remote =
+      chromeos::mojo_service_manager::ConnectToMojoServiceManager();
+  if (!pending_remote) {
+    LOG(ERROR) << "Failed to connect to mojo service manager.";
+    return;
+  }
+  service_manager_.Bind(std::move(pending_remote));
+  service_manager_.set_disconnect_with_reason_handler(
+      base::BindOnce([](uint32_t error, const std::string& message) {
+        LOG(ERROR) << "Disconnected from mojo service manager. Error: " << error
+                   << ", message: " << message;
+      }));
+
+  service_manager_->Request(
+      chromeos::mojo_services::kCrosHealthdProbe,
+      kCrosHealthdConnectingTimeout,
+      cros_healthd_probe_service_.BindNewPipeAndPassReceiver().PassPipe());
+  cros_healthd_probe_service_.set_disconnect_with_reason_handler(
+      base::BindOnce([](uint32_t error, const std::string& message) {
+        LOG(ERROR) << "Disconnected from cros_healthd probe service. Error: "
+                   << error << ", message: " << message;
+      }));
 }
 
 TelemetryInfo* const CrosHealthd::GetTelemetryInfo() {
@@ -90,116 +121,82 @@ TelemetryInfo* const CrosHealthd::GetTelemetryInfo() {
 
 void CrosHealthd::ProbeTelemetryInfo(
     const std::unordered_set<TelemetryCategoryEnum>& categories,
-    ProbeTelemetryInfoCallback once_callback) {
+    base::OnceClosure once_callback) {
+  if (!cros_healthd_probe_service_.is_bound()) {
+    LOG(WARNING) << "Skip probing because connection of cros_healthd is not "
+                    "initialized.";
+    std::move(once_callback).Run();
+    return;
+  }
   std::vector<ProbeCategoryEnum> categories_mojo;
   for (const auto& category : categories) {
     auto it = kTelemetryMojoMapping.find(category);
     if (it != kTelemetryMojoMapping.end())
       categories_mojo.push_back(it->second);
   }
-  cros_healthd_service_factory_->GetProbeService(
-      cros_healthd_probe_service_.BindNewPipeAndPassReceiver());
+  auto callback = base::BindOnce(&CrosHealthd::OnProbeTelemetryInfo,
+                                 weak_ptr_factory_.GetWeakPtr(),
+                                 std::move(once_callback));
   cros_healthd_probe_service_->ProbeTelemetryInfo(
       categories_mojo,
-      base::BindOnce(&CrosHealthd::OnProbeTelemetryInfo,
-                     weak_ptr_factory_.GetWeakPtr(),
-                     std::move(once_callback)));
-}
-
-dbus::ObjectProxy* CrosHealthd::GetCrosHealthdObjectProxy() {
-  return DBusConnection::Get()->GetDBus()->GetObjectProxy(
-      diagnostics::kCrosHealthdServiceName,
-      dbus::ObjectPath(diagnostics::kCrosHealthdServicePath));
-}
-
-bool CrosHealthd::BootstrapMojo() {
-  mojo::PlatformChannel channel;
-  brillo::dbus_utils::FileDescriptor fd(
-      channel.TakeRemoteEndpoint().TakePlatformHandle().TakeFD().release());
-  brillo::ErrorPtr error;
-  auto response = brillo::dbus_utils::CallMethodAndBlock(
-      GetCrosHealthdObjectProxy(),
-      diagnostics::kCrosHealthdServiceInterface,
-      diagnostics::kCrosHealthdBootstrapMojoConnectionMethod,
-      &error,
-      fd,
-      /*is_chrome=*/false);
-  if (!response) {
-    LOG(ERROR) << "Failed to bootstrap mojo connection with cros_healthd.";
-    return false;
-  }
-
-  std::string token;
-  dbus::MessageReader reader(response.get());
-  if (!reader.PopString(&token)) {
-    LOG(ERROR) << "Failed to get token from cros_healthd DBus response.";
-    return false;
-  }
-
-  mojo::IncomingInvitation invitation =
-      mojo::IncomingInvitation::Accept(channel.TakeLocalEndpoint());
-  auto opt_pending_service_factory = mojo::PendingRemote<
-      chromeos::cros_healthd::mojom::CrosHealthdServiceFactory>(
-      invitation.ExtractMessagePipe(token), 0u /* version */);
-  if (!opt_pending_service_factory) {
-    LOG(ERROR) << "Failed to create pending service factory for cros_healthd.";
-    return false;
-  }
-  cros_healthd_service_factory_.Bind(std::move(opt_pending_service_factory));
-
-  return true;
+      mojo::WrapCallbackWithDefaultInvokeIfNotRun(std::move(callback),
+                                                  nullptr));
 }
 
 void CrosHealthd::OnProbeTelemetryInfo(
-    ProbeTelemetryInfoCallback once_callback,
-    chromeos::cros_healthd::mojom::TelemetryInfoPtr result) {
+    base::OnceClosure once_callback,
+    ash::cros_healthd::mojom::TelemetryInfoPtr result) {
   if (!result) {
     LOG(WARNING) << "Failed to parse telemetry information.";
-    std::move(once_callback).Run({});
+    std::move(once_callback).Run();
     return;
   }
-  if (!ParseSystemResultV2(&result, telemetry_info_.get()))
-    LOG(WARNING) << "Failed to parse system_v2 information.";
+  LOG(INFO) << "Probed telemetry info from cros_healthd.";
+  telemetry_info_ = std::make_unique<TelemetryInfo>();
+  if (!ParseSystemResult(&result, telemetry_info_.get()))
+    LOG(WARNING) << "Failed to parse system information.";
   if (!ParseMemoryResult(&result, telemetry_info_.get()))
     LOG(WARNING) << "Failed to parse memory information.";
   if (!ParseNonRemovableBlockDeviceResult(&result, telemetry_info_.get()))
     LOG(WARNING) << "Failed to parse non-removable block device information.";
   if (!ParseCpuResult(&result, telemetry_info_.get()))
     LOG(WARNING) << "Failed to parse physical CPU information.";
-  std::move(once_callback).Run(*telemetry_info_);
+  if (!ParseBusResult(&result, telemetry_info_.get()))
+    LOG(WARNING) << "Failed to parse bus information.";
+  std::move(once_callback).Run();
 }
 
-bool CrosHealthd::ParseSystemResultV2(
-    chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
+bool CrosHealthd::ParseSystemResult(
+    ash::cros_healthd::mojom::TelemetryInfoPtr* result,
     TelemetryInfo* telemetry_info) {
-  const auto& system_result_v2 = (*result)->system_result_v2;
-  if (system_result_v2) {
-    if (system_result_v2->is_error()) {
-      PrintError(system_result_v2->get_error(), "system_v2 information");
+  const auto& system_result = (*result)->system_result;
+  if (system_result) {
+    if (system_result->is_error()) {
+      PrintError(system_result->get_error(), "system information");
       return false;
     }
-    const auto& system_info_v2 = system_result_v2->get_system_info_v2();
+    const auto& system_info = system_result->get_system_info();
 
-    const auto& dmi_info = system_info_v2->dmi_info;
+    const auto& dmi_info = system_info->dmi_info;
     if (dmi_info) {
-      if (dmi_info->board_vendor.has_value())
-        telemetry_info->system_v2_info.dmi_info.board_vendor =
-            dmi_info->board_vendor.value();
-      if (dmi_info->board_name.has_value())
-        telemetry_info->system_v2_info.dmi_info.board_name =
-            dmi_info->board_name.value();
-      if (dmi_info->board_version.has_value())
-        telemetry_info->system_v2_info.dmi_info.board_version =
-            dmi_info->board_version.value();
+      if (dmi_info->sys_vendor.has_value())
+        telemetry_info->system_info.dmi_info.sys_vendor =
+            dmi_info->sys_vendor.value();
+      if (dmi_info->product_name.has_value())
+        telemetry_info->system_info.dmi_info.product_name =
+            dmi_info->product_name.value();
+      if (dmi_info->product_version.has_value())
+        telemetry_info->system_info.dmi_info.product_version =
+            dmi_info->product_version.value();
       if (dmi_info->bios_version.has_value())
-        telemetry_info->system_v2_info.dmi_info.bios_version =
+        telemetry_info->system_info.dmi_info.bios_version =
             dmi_info->bios_version.value();
     }
 
-    const auto& os_info = system_info_v2->os_info;
+    const auto& os_info = system_info->os_info;
     if (os_info) {
-      telemetry_info->system_v2_info.os_info.boot_mode =
-          static_cast<TelemetryInfo::SystemV2Info::OsInfo::BootMode>(
+      telemetry_info->system_info.os_info.boot_mode =
+          static_cast<TelemetryInfo::SystemInfo::OsInfo::BootMode>(
               os_info->boot_mode);
     }
   }
@@ -207,7 +204,7 @@ bool CrosHealthd::ParseSystemResultV2(
 }
 
 bool CrosHealthd::ParseMemoryResult(
-    chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
+    ash::cros_healthd::mojom::TelemetryInfoPtr* result,
     TelemetryInfo* telemetry_info) {
   const auto& memory_result = (*result)->memory_result;
   if (memory_result) {
@@ -225,7 +222,7 @@ bool CrosHealthd::ParseMemoryResult(
 }
 
 bool CrosHealthd::ParseNonRemovableBlockDeviceResult(
-    chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
+    ash::cros_healthd::mojom::TelemetryInfoPtr* result,
     TelemetryInfo* telemetry_info) {
   const auto& non_removable_block_device_result =
       (*result)->block_device_result;
@@ -248,7 +245,7 @@ bool CrosHealthd::ParseNonRemovableBlockDeviceResult(
 }
 
 bool CrosHealthd::ParseCpuResult(
-    chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
+    ash::cros_healthd::mojom::TelemetryInfoPtr* result,
     TelemetryInfo* telemetry_info) {
   const auto& cpu_result = (*result)->cpu_result;
   if (cpu_result) {
@@ -269,7 +266,7 @@ bool CrosHealthd::ParseCpuResult(
 }
 
 bool CrosHealthd::ParseBusResult(
-    chromeos::cros_healthd::mojom::TelemetryInfoPtr* result,
+    ash::cros_healthd::mojom::TelemetryInfoPtr* result,
     TelemetryInfo* telemetry_info) {
   const auto& bus_result = (*result)->bus_result;
   if (bus_result) {
@@ -279,8 +276,10 @@ bool CrosHealthd::ParseBusResult(
     }
     const auto& bus_devices = bus_result->get_bus_devices();
     for (const auto& bus_device : bus_devices) {
+      if (!bus_device->bus_info)
+        continue;
       switch (bus_device->bus_info->which()) {
-        case chromeos::cros_healthd::mojom::BusInfo::Tag::PCI_BUS_INFO: {
+        case ash::cros_healthd::mojom::BusInfo::Tag::kPciBusInfo: {
           const auto& pci_bus_info = bus_device->bus_info->get_pci_bus_info();
           telemetry_info->bus_devices.push_back({
               .device_class =
@@ -297,7 +296,7 @@ bool CrosHealthd::ParseBusResult(
           });
           break;
         }
-        case chromeos::cros_healthd::mojom::BusInfo::Tag::USB_BUS_INFO: {
+        case ash::cros_healthd::mojom::BusInfo::Tag::kUsbBusInfo: {
           const auto& usb_bus_info = bus_device->bus_info->get_usb_bus_info();
           telemetry_info->bus_devices.push_back({
               .device_class =
@@ -309,6 +308,14 @@ bool CrosHealthd::ParseBusResult(
                       .product_id = usb_bus_info->product_id,
                   },
           });
+          break;
+        }
+        case ash::cros_healthd::mojom::BusInfo::Tag::kThunderboltBusInfo: {
+          break;
+        }
+        case ash::cros_healthd::mojom::BusInfo::Tag::kUnmappedField: {
+          LOG(ERROR) << "Get unmapped Mojo fields by retrieving bus info from "
+                        "cros_healthd";
           break;
         }
       }

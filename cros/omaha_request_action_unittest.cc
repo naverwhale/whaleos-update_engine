@@ -24,9 +24,9 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/file_util.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
 #include <base/memory/ptr_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_util.h>
@@ -446,6 +446,9 @@ class OmahaRequestActionTest : public ::testing::Test {
         .expected_download_error_code = metrics::DownloadErrorCode::kUnset,
     };
 
+    ON_CALL(*FakeSystemState::Get()->mock_update_attempter(),
+            IsRepeatedUpdatesEnabled())
+        .WillByDefault(Return(true));
     ON_CALL(*FakeSystemState::Get()->mock_update_attempter(), GetExcluder())
         .WillByDefault(Return(&mock_excluder_));
   }
@@ -587,7 +590,7 @@ bool OmahaRequestActionTest::TestUpdateCheck() {
                                tuc_params_.expected_download_error_code))
       .Times(tuc_params_.ping_only ? 0 : 1);
 
-  loop_.PostTask(base::Bind(
+  loop_.PostTask(base::BindOnce(
       [](ActionProcessor* processor) { processor->StartProcessing(); },
       base::Unretained(&processor)));
   loop_.Run();
@@ -613,7 +616,7 @@ void OmahaRequestActionTest::TestEvent(OmahaEvent* event,
   processor.set_delegate(&delegate_);
   processor.EnqueueAction(std::move(action));
 
-  loop_.PostTask(base::Bind(
+  loop_.PostTask(base::BindOnce(
       [](ActionProcessor* processor) { processor->StartProcessing(); },
       base::Unretained(&processor)));
   loop_.Run();
@@ -844,6 +847,9 @@ TEST_F(OmahaRequestActionTest, ExtraHeadersSentInteractiveTest) {
 
 TEST_F(OmahaRequestActionTest, ExtraHeadersSentNoInteractiveTest) {
   request_params_.set_interactive(false);
+  FakeSystemState::Get()->set_update_attempter(nullptr);
+  ON_CALL(*FakeSystemState::Get()->mock_update_attempter(), IsUpdating())
+      .WillByDefault(Return(true));
   test_http_fetcher_headers_ = true;
   tuc_params_.http_response = "invalid xml>";
   tuc_params_.expected_code = ErrorCode::kOmahaRequestXMLParseError;
@@ -855,6 +861,29 @@ TEST_F(OmahaRequestActionTest, ExtraHeadersSentNoInteractiveTest) {
   EXPECT_FALSE(response_.update_exists);
 }
 
+TEST_F(OmahaRequestActionTest, NonUpdatesAreAlwaysInForeGround) {
+  request_params_.set_interactive(true);
+  FakeSystemState::Get()->set_update_attempter(nullptr);
+  ON_CALL(*FakeSystemState::Get()->mock_update_attempter(), IsUpdating())
+      .WillByDefault(Return(false));
+  delegate_.interactive_ = true;
+  delegate_.test_http_fetcher_headers_ = true;
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+  ASSERT_TRUE(TestUpdateCheck());
+}
+
+TEST_F(OmahaRequestActionTest,
+       NonUpdatesAreAlwaysInForeGroundPrecedenceOverParams) {
+  request_params_.set_interactive(false);
+  FakeSystemState::Get()->set_update_attempter(nullptr);
+  ON_CALL(*FakeSystemState::Get()->mock_update_attempter(), IsUpdating())
+      .WillByDefault(Return(false));
+  delegate_.interactive_ = true;
+  delegate_.test_http_fetcher_headers_ = true;
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+  ASSERT_TRUE(TestUpdateCheck());
+}
+
 TEST_F(OmahaRequestActionTest, ValidUpdateBlockedByConnection) {
   // Set up a connection manager that doesn't allow a valid update over
   // the current ethernet connection.
@@ -863,10 +892,12 @@ TEST_F(OmahaRequestActionTest, ValidUpdateBlockedByConnection) {
 
   EXPECT_CALL(mock_cm, GetConnectionProperties(_, _))
       .WillRepeatedly(DoAll(SetArgPointee<0>(ConnectionType::kEthernet),
-                            SetArgPointee<1>(ConnectionTethering::kUnknown),
+                            SetArgPointee<1>(true),
                             Return(true)));
-  EXPECT_CALL(mock_cm, IsUpdateAllowedOver(ConnectionType::kEthernet, _))
+  EXPECT_CALL(mock_cm, IsUpdateAllowedOverMetered())
       .WillRepeatedly(Return(false));
+  EXPECT_CALL(mock_cm, IsAllowedConnectionTypesForUpdateSet())
+      .WillRepeatedly(Return(true));
 
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
   tuc_params_.expected_code = ErrorCode::kOmahaUpdateIgnoredPerPolicy;
@@ -885,11 +916,11 @@ TEST_F(OmahaRequestActionTest, ValidUpdateOverCellularAllowedByDevicePolicy) {
 
   EXPECT_CALL(mock_cm, GetConnectionProperties(_, _))
       .WillRepeatedly(DoAll(SetArgPointee<0>(ConnectionType::kCellular),
-                            SetArgPointee<1>(ConnectionTethering::kUnknown),
+                            SetArgPointee<1>(true),
                             Return(true)));
   EXPECT_CALL(mock_cm, IsAllowedConnectionTypesForUpdateSet())
       .WillRepeatedly(Return(true));
-  EXPECT_CALL(mock_cm, IsUpdateAllowedOver(ConnectionType::kCellular, _))
+  EXPECT_CALL(mock_cm, IsUpdateAllowedOverMetered())
       .WillRepeatedly(Return(true));
 
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
@@ -907,11 +938,11 @@ TEST_F(OmahaRequestActionTest, ValidUpdateOverCellularBlockedByDevicePolicy) {
 
   EXPECT_CALL(mock_cm, GetConnectionProperties(_, _))
       .WillRepeatedly(DoAll(SetArgPointee<0>(ConnectionType::kCellular),
-                            SetArgPointee<1>(ConnectionTethering::kUnknown),
+                            SetArgPointee<1>(true),
                             Return(true)));
   EXPECT_CALL(mock_cm, IsAllowedConnectionTypesForUpdateSet())
       .WillRepeatedly(Return(true));
-  EXPECT_CALL(mock_cm, IsUpdateAllowedOver(ConnectionType::kCellular, _))
+  EXPECT_CALL(mock_cm, IsUpdateAllowedOverMetered())
       .WillRepeatedly(Return(false));
 
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
@@ -933,11 +964,11 @@ TEST_F(OmahaRequestActionTest,
 
   EXPECT_CALL(mock_cm, GetConnectionProperties(_, _))
       .WillRepeatedly(DoAll(SetArgPointee<0>(ConnectionType::kCellular),
-                            SetArgPointee<1>(ConnectionTethering::kUnknown),
+                            SetArgPointee<1>(true),
                             Return(true)));
   EXPECT_CALL(mock_cm, IsAllowedConnectionTypesForUpdateSet())
       .WillRepeatedly(Return(false));
-  EXPECT_CALL(mock_cm, IsUpdateAllowedOver(ConnectionType::kCellular, _))
+  EXPECT_CALL(mock_cm, IsUpdateAllowedOverMetered())
       .WillRepeatedly(Return(true));
 
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
@@ -965,11 +996,11 @@ TEST_F(OmahaRequestActionTest,
 
   EXPECT_CALL(mock_cm, GetConnectionProperties(_, _))
       .WillRepeatedly(DoAll(SetArgPointee<0>(ConnectionType::kCellular),
-                            SetArgPointee<1>(ConnectionTethering::kUnknown),
+                            SetArgPointee<1>(true),
                             Return(true)));
   EXPECT_CALL(mock_cm, IsAllowedConnectionTypesForUpdateSet())
       .WillRepeatedly(Return(false));
-  EXPECT_CALL(mock_cm, IsUpdateAllowedOver(ConnectionType::kCellular, _))
+  EXPECT_CALL(mock_cm, IsUpdateAllowedOverMetered())
       .WillRepeatedly(Return(true));
 
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
@@ -1009,11 +1040,11 @@ TEST_F(OmahaRequestActionTest,
 
   EXPECT_CALL(mock_cm, GetConnectionProperties(_, _))
       .WillRepeatedly(DoAll(SetArgPointee<0>(ConnectionType::kCellular),
-                            SetArgPointee<1>(ConnectionTethering::kUnknown),
+                            SetArgPointee<1>(true),
                             Return(true)));
   EXPECT_CALL(mock_cm, IsAllowedConnectionTypesForUpdateSet())
       .WillRepeatedly(Return(false));
-  EXPECT_CALL(mock_cm, IsUpdateAllowedOver(ConnectionType::kCellular, _))
+  EXPECT_CALL(mock_cm, IsUpdateAllowedOverMetered())
       .WillRepeatedly(Return(true));
 
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
@@ -1023,13 +1054,38 @@ TEST_F(OmahaRequestActionTest,
   EXPECT_TRUE(response_.update_exists);
 }
 
+TEST_F(OmahaRequestActionTest, ValidUpdateOverMeteredBlocked) {
+  MockConnectionManager mock_cm;
+  FakeSystemState::Get()->set_connection_manager(&mock_cm);
+
+  EXPECT_CALL(mock_cm, GetConnectionProperties(_, _))
+      .WillRepeatedly(DoAll(SetArgPointee<0>(ConnectionType::kWifi),
+                            SetArgPointee<1>(true),
+                            Return(true)));
+  EXPECT_CALL(mock_cm, IsAllowedConnectionTypesForUpdateSet())
+      .WillRepeatedly(Return(false));
+  EXPECT_CALL(mock_cm, IsUpdateAllowedOverMetered())
+      .WillRepeatedly(Return(false));
+
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+  tuc_params_.expected_code = ErrorCode::kOmahaUpdateIgnoredOverMetered;
+  tuc_params_.expected_check_reaction = metrics::CheckReaction::kIgnored;
+
+  ASSERT_FALSE(TestUpdateCheck());
+
+  EXPECT_FALSE(response_.update_exists);
+}
+
+// Verify that update checks will not try to download an update if it
+// corresponds to the rollback version. It should be ignored.
 TEST_F(OmahaRequestActionTest, ValidUpdateBlockedByRollback) {
   string rollback_version = "1234.0.0";
   MockPayloadState mock_payload_state;
   FakeSystemState::Get()->set_payload_state(&mock_payload_state);
   fake_update_response_.version = rollback_version;
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
-  tuc_params_.expected_code = ErrorCode::kOmahaUpdateIgnoredPerPolicy;
+  tuc_params_.expected_code = ErrorCode::kUpdateIgnoredRollbackVersion;
+  tuc_params_.expected_check_result = metrics::CheckResult::kUpdateAvailable;
   tuc_params_.expected_check_reaction = metrics::CheckReaction::kIgnored;
 
   EXPECT_CALL(mock_payload_state, GetRollbackVersion())
@@ -1101,6 +1157,29 @@ TEST_F(OmahaRequestActionTest, SkipNonCriticalUpdatesBeforeOOBERollback) {
 }
 
 // Verify that non-critical updates are skipped by reporting the
+// kNonCriticalUpdateEnrollmentRecovery error code.
+TEST_F(OmahaRequestActionTest, SkipNonCriticalUpdatesEnrollmentRecoveryMode) {
+  FakeSystemState::Get()->fake_hardware()->SetIsEnrollmentRecoveryMode(true);
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+  tuc_params_.expected_code = ErrorCode::kNonCriticalUpdateEnrollmentRecovery;
+  tuc_params_.expected_check_result = metrics::CheckResult::kParsingError;
+  tuc_params_.expected_check_reaction = metrics::CheckReaction::kUnset;
+
+  ASSERT_FALSE(TestUpdateCheck());
+
+  EXPECT_FALSE(response_.update_exists);
+}
+
+TEST_F(OmahaRequestActionTest, ValidUpdateForNonEnrollmentRecoveryMode) {
+  FakeSystemState::Get()->fake_hardware()->SetIsEnrollmentRecoveryMode(false);
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+
+  ASSERT_TRUE(TestUpdateCheck());
+
+  EXPECT_TRUE(response_.update_exists);
+}
+
+// Verify that non-critical updates are skipped by reporting the
 // kNonCriticalUpdateInOOBE error code when attempted over cellular network -
 // i.e. when the update would need user permission. Note that reporting
 // kOmahaUpdateIgnoredOverCellular error in this case  might cause undesired UX
@@ -1117,7 +1196,7 @@ TEST_F(OmahaRequestActionTest, SkipNonCriticalUpdatesInOOBEOverCellular) {
 
   EXPECT_CALL(mock_cm, GetConnectionProperties(_, _))
       .WillRepeatedly(DoAll(SetArgPointee<0>(ConnectionType::kCellular),
-                            SetArgPointee<1>(ConnectionTethering::kUnknown),
+                            SetArgPointee<1>(true),
                             Return(true)));
   EXPECT_CALL(mock_cm, IsAllowedConnectionTypesForUpdateSet())
       .WillRepeatedly(Return(false));
@@ -1140,10 +1219,25 @@ TEST_F(OmahaRequestActionTest, AllowMiniOsWithoutOOBE) {
   EXPECT_TRUE(response_.update_exists);
 }
 
+TEST_F(OmahaRequestActionTest, WallClockBasedWaitForDLCsDoNotScatter) {
+  request_params_.set_wall_clock_based_wait_enabled(true);
+  request_params_.set_update_check_count_wait_enabled(false);
+  request_params_.set_waiting_period(base::Days(2));
+  request_params_.set_is_install(true);
+  FakeSystemState::Get()->fake_clock()->SetWallclockTime(Time::Now());
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+  tuc_params_.expected_code = ErrorCode::kSuccess,
+  tuc_params_.expected_check_reaction = metrics::CheckReaction::kUpdating;
+
+  ASSERT_TRUE(TestUpdateCheck());
+
+  EXPECT_TRUE(response_.update_exists);
+}
+
 TEST_F(OmahaRequestActionTest, WallClockBasedWaitAloneCausesScattering) {
   request_params_.set_wall_clock_based_wait_enabled(true);
   request_params_.set_update_check_count_wait_enabled(false);
-  request_params_.set_waiting_period(TimeDelta::FromDays(2));
+  request_params_.set_waiting_period(base::Days(2));
   FakeSystemState::Get()->fake_clock()->SetWallclockTime(Time::Now());
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
   tuc_params_.expected_code = ErrorCode::kOmahaUpdateDeferredPerPolicy;
@@ -1158,7 +1252,7 @@ TEST_F(OmahaRequestActionTest,
        WallClockBasedWaitAloneCausesScatteringInteractive) {
   request_params_.set_wall_clock_based_wait_enabled(true);
   request_params_.set_update_check_count_wait_enabled(false);
-  request_params_.set_waiting_period(TimeDelta::FromDays(2));
+  request_params_.set_waiting_period(base::Days(2));
   request_params_.set_interactive(true);
   FakeSystemState::Get()->fake_clock()->SetWallclockTime(Time::Now());
   tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
@@ -1171,7 +1265,7 @@ TEST_F(OmahaRequestActionTest,
 
 TEST_F(OmahaRequestActionTest, NoWallClockBasedWaitCausesNoScattering) {
   request_params_.set_wall_clock_based_wait_enabled(false);
-  request_params_.set_waiting_period(TimeDelta::FromDays(2));
+  request_params_.set_waiting_period(base::Days(2));
   request_params_.set_update_check_count_wait_enabled(true);
   request_params_.set_min_update_checks_needed(1);
   request_params_.set_max_update_checks_allowed(8);
@@ -1182,9 +1276,36 @@ TEST_F(OmahaRequestActionTest, NoWallClockBasedWaitCausesNoScattering) {
   EXPECT_TRUE(response_.update_exists);
 }
 
+// Verify that non-critical updates are ignored for no consumer user during
+// OOBE.
+TEST_F(OmahaRequestActionTest, SkipNonCriticalUpdatesNoConsumerUser) {
+  FakeSystemState::Get()->fake_hardware()->UnsetIsOOBEComplete();
+  FakeSystemState::Get()->fake_hardware()->SetIsConsumerSegment(false);
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+  tuc_params_.expected_code = ErrorCode::kNonCriticalUpdateInOOBE;
+  tuc_params_.expected_check_result = metrics::CheckResult::kParsingError;
+  tuc_params_.expected_check_reaction = metrics::CheckReaction::kUnset;
+
+  ASSERT_FALSE(TestUpdateCheck());
+
+  EXPECT_FALSE(response_.update_exists);
+}
+
+// Verify that non-critical updates are not ignored for consumer user during
+// OOBE.
+TEST_F(OmahaRequestActionTest, ValidUpdateForConsumerUserInOOBE) {
+  FakeSystemState::Get()->fake_hardware()->UnsetIsOOBEComplete();
+  FakeSystemState::Get()->fake_hardware()->SetIsConsumerSegment(true);
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+
+  ASSERT_TRUE(TestUpdateCheck());
+
+  EXPECT_TRUE(response_.update_exists);
+}
+
 TEST_F(OmahaRequestActionTest, ZeroMaxDaysToScatterCausesNoScattering) {
   request_params_.set_wall_clock_based_wait_enabled(true);
-  request_params_.set_waiting_period(TimeDelta::FromDays(2));
+  request_params_.set_waiting_period(base::Days(2));
   request_params_.set_update_check_count_wait_enabled(true);
   request_params_.set_min_update_checks_needed(1);
   request_params_.set_max_update_checks_allowed(8);
@@ -1293,7 +1414,7 @@ TEST_F(OmahaRequestActionTest, StagingTurnedOnCausesScattering) {
   // If staging is on, the value for max days to scatter should be ignored, and
   // staging's scatter value should be used.
   request_params_.set_wall_clock_based_wait_enabled(true);
-  request_params_.set_waiting_period(TimeDelta::FromDays(6));
+  request_params_.set_waiting_period(base::Days(6));
   request_params_.set_update_check_count_wait_enabled(false);
   FakeSystemState::Get()->fake_clock()->SetWallclockTime(Time::Now());
 
@@ -1535,7 +1656,7 @@ TEST_F(OmahaRequestActionTest, NoOutputPipeTest) {
   processor.set_delegate(&delegate_);
   processor.EnqueueAction(std::move(action));
 
-  loop_.PostTask(base::Bind(
+  loop_.PostTask(base::BindOnce(
       [](ActionProcessor* processor) { processor->StartProcessing(); },
       base::Unretained(&processor)));
   loop_.Run();
@@ -1668,7 +1789,7 @@ TEST_F(OmahaRequestActionTest, TerminateTransferTest) {
   processor.set_delegate(&delegate);
   processor.EnqueueAction(std::move(action));
 
-  loop_.PostTask(base::Bind(&TerminateTransferTestStarter, &processor));
+  loop_.PostTask(base::BindOnce(&TerminateTransferTestStarter, &processor));
   loop_.Run();
   EXPECT_FALSE(loop_.PendingTasks());
 }
@@ -2041,9 +2162,9 @@ void OmahaRequestActionTest::PingTest(bool ping_only) {
   EXPECT_CALL(prefs, SetInt64(_, _)).Times(AnyNumber());
   // Add a few hours to the day difference to test no rounding, etc.
   int64_t five_days_ago =
-      (Time::Now() - TimeDelta::FromHours(5 * 24 + 13)).ToInternalValue();
+      (Time::Now() - base::Hours(5 * 24 + 13)).ToInternalValue();
   int64_t six_days_ago =
-      (Time::Now() - TimeDelta::FromHours(6 * 24 + 11)).ToInternalValue();
+      (Time::Now() - base::Hours(6 * 24 + 11)).ToInternalValue();
   EXPECT_CALL(prefs, GetInt64(kPrefsInstallDateDays, _))
       .WillOnce(DoAll(SetArgPointee<1>(0), Return(true)));
   EXPECT_CALL(prefs, GetInt64(kPrefsLastActivePingDay, _))
@@ -2084,7 +2205,7 @@ TEST_F(OmahaRequestActionTest, ActivePingTest) {
       .Times(AnyNumber());
   EXPECT_CALL(prefs, SetInt64(_, _)).Times(AnyNumber());
   int64_t three_days_ago =
-      (Time::Now() - TimeDelta::FromHours(3 * 24 + 12)).ToInternalValue();
+      (Time::Now() - base::Hours(3 * 24 + 12)).ToInternalValue();
   int64_t now = Time::Now().ToInternalValue();
   EXPECT_CALL(prefs, GetInt64(kPrefsInstallDateDays, _))
       .WillOnce(DoAll(SetArgPointee<1>(0), Return(true)));
@@ -2108,8 +2229,7 @@ TEST_F(OmahaRequestActionTest, RollCallPingTest) {
   EXPECT_CALL(prefs, GetInt64(kPrefsMetricsCheckLastReportingTime, _))
       .Times(AnyNumber());
   EXPECT_CALL(prefs, SetInt64(_, _)).Times(AnyNumber());
-  int64_t four_days_ago =
-      (Time::Now() - TimeDelta::FromHours(4 * 24)).ToInternalValue();
+  int64_t four_days_ago = (Time::Now() - base::Hours(4 * 24)).ToInternalValue();
   int64_t now = Time::Now().ToInternalValue();
   EXPECT_CALL(prefs, GetInt64(kPrefsInstallDateDays, _))
       .WillOnce(DoAll(SetArgPointee<1>(0), Return(true)));
@@ -2134,8 +2254,7 @@ TEST_F(OmahaRequestActionTest, NoPingTest) {
   EXPECT_CALL(prefs, GetInt64(kPrefsMetricsCheckLastReportingTime, _))
       .Times(AnyNumber());
   EXPECT_CALL(prefs, SetInt64(_, _)).Times(AnyNumber());
-  int64_t one_hour_ago =
-      (Time::Now() - TimeDelta::FromHours(1)).ToInternalValue();
+  int64_t one_hour_ago = (Time::Now() - base::Hours(1)).ToInternalValue();
   EXPECT_CALL(prefs, GetInt64(kPrefsInstallDateDays, _))
       .WillOnce(DoAll(SetArgPointee<1>(0), Return(true)));
   EXPECT_CALL(prefs, GetInt64(kPrefsLastActivePingDay, _))
@@ -2185,8 +2304,7 @@ TEST_F(OmahaRequestActionTest, BackInTimePingTest) {
   EXPECT_CALL(prefs, GetInt64(kPrefsMetricsCheckLastReportingTime, _))
       .Times(AnyNumber());
   EXPECT_CALL(prefs, SetInt64(_, _)).Times(AnyNumber());
-  int64_t future =
-      (Time::Now() + TimeDelta::FromHours(3 * 24 + 4)).ToInternalValue();
+  int64_t future = (Time::Now() + base::Hours(3 * 24 + 4)).ToInternalValue();
   EXPECT_CALL(prefs, GetInt64(kPrefsInstallDateDays, _))
       .WillOnce(DoAll(SetArgPointee<1>(0), Return(true)));
   EXPECT_CALL(prefs, GetInt64(kPrefsLastActivePingDay, _))
@@ -2215,10 +2333,8 @@ TEST_F(OmahaRequestActionTest, LastPingDayUpdateTest) {
   // minus 200 seconds with a slack of 5 seconds. Therefore, the test
   // may fail if it runs for longer than 5 seconds. It shouldn't run
   // that long though.
-  int64_t midnight =
-      (Time::Now() - TimeDelta::FromSeconds(200)).ToInternalValue();
-  int64_t midnight_slack =
-      (Time::Now() - TimeDelta::FromSeconds(195)).ToInternalValue();
+  int64_t midnight = (Time::Now() - base::Seconds(200)).ToInternalValue();
+  int64_t midnight_slack = (Time::Now() - base::Seconds(195)).ToInternalValue();
   NiceMock<MockPrefs> prefs;
   FakeSystemState::Get()->set_prefs(&prefs);
   EXPECT_CALL(prefs, GetInt64(_, _)).Times(AnyNumber());
@@ -2325,7 +2441,7 @@ TEST_F(OmahaRequestActionTest, NetworkFailureBadHTTPCodeTest) {
 
 TEST_F(OmahaRequestActionTest, TestUpdateFirstSeenAtGetsPersistedFirstTime) {
   request_params_.set_wall_clock_based_wait_enabled(true);
-  request_params_.set_waiting_period(TimeDelta().FromDays(1));
+  request_params_.set_waiting_period(base::Days(1));
   request_params_.set_update_check_count_wait_enabled(false);
 
   Time arbitrary_date;
@@ -2354,7 +2470,7 @@ TEST_F(OmahaRequestActionTest, TestUpdateFirstSeenAtGetsPersistedFirstTime) {
 
 TEST_F(OmahaRequestActionTest, TestUpdateFirstSeenAtGetsUsedIfAlreadyPresent) {
   request_params_.set_wall_clock_based_wait_enabled(true);
-  request_params_.set_waiting_period(TimeDelta().FromDays(1));
+  request_params_.set_waiting_period(base::Days(1));
   request_params_.set_update_check_count_wait_enabled(false);
 
   Time t1, t2;
@@ -2384,9 +2500,8 @@ TEST_F(OmahaRequestActionTest, TestChangingToMoreStableChannel) {
   request_params_.set_app_id("{22222222-2222-2222-2222-222222222222}");
   request_params_.set_app_version("1.2.3.4");
   request_params_.set_product_components("o.bundle=1");
-  request_params_.set_current_channel("canary-channel");
-  EXPECT_TRUE(
-      request_params_.SetTargetChannel("stable-channel", true, nullptr));
+  request_params_.set_current_channel(kCanaryChannel);
+  EXPECT_TRUE(request_params_.SetTargetChannel(kStableChannel, true, nullptr));
   request_params_.UpdateDownloadChannel();
   EXPECT_TRUE(request_params_.ShouldPowerwash());
 
@@ -2414,9 +2529,8 @@ TEST_F(OmahaRequestActionTest, TestChangingToLessStableChannel) {
   request_params_.set_app_id("{11111111-1111-1111-1111-111111111111}");
   request_params_.set_app_version("5.6.7.8");
   request_params_.set_product_components("o.bundle=1");
-  request_params_.set_current_channel("stable-channel");
-  EXPECT_TRUE(
-      request_params_.SetTargetChannel("canary-channel", false, nullptr));
+  request_params_.set_current_channel(kStableChannel);
+  EXPECT_TRUE(request_params_.SetTargetChannel(kCanaryChannel, false, nullptr));
   request_params_.UpdateDownloadChannel();
   EXPECT_FALSE(request_params_.ShouldPowerwash());
 
@@ -2534,7 +2648,7 @@ void OmahaRequestActionTest::P2PTest(bool initial_allow_p2p_for_downloading,
   FakeSystemState::Get()->set_p2p_manager(&mock_p2p_manager);
   mock_p2p_manager.fake().SetLookupUrlForFileResult(p2p_client_result_url);
 
-  TimeDelta timeout = TimeDelta::FromSeconds(kMaxP2PNetworkWaitTimeSeconds);
+  TimeDelta timeout = kMaxP2PNetworkWaitTime;
   EXPECT_CALL(mock_p2p_manager, LookupUrlForFile(_, _, timeout, _))
       .Times(expect_p2p_client_lookup ? 1 : 0);
 
@@ -3165,6 +3279,23 @@ TEST_F(OmahaRequestActionTest, OmahaResponseUpdateCanExcludeCheck) {
   EXPECT_TRUE(packages[1].can_exclude);
 }
 
+TEST_F(OmahaRequestActionTest, OmahaResponseCriticalDlcUpdateNotExcludedCheck) {
+  request_params_.set_dlc_apps_params(
+      {{request_params_.GetDlcAppId(kDlcId2),
+        {.critical_update = true, .name = kDlcId2}}});
+  fake_update_response_.dlc_app_update = true;
+  tuc_params_.http_response = fake_update_response_.GetUpdateResponse();
+
+  EXPECT_CALL(mock_excluder_, IsExcluded(_)).WillRepeatedly(Return(false));
+  ASSERT_TRUE(TestUpdateCheck());
+  ASSERT_TRUE(delegate_.omaha_response_);
+  const auto& packages = delegate_.omaha_response_->packages;
+  ASSERT_EQ(packages.size(), 2);
+
+  EXPECT_FALSE(packages[0].can_exclude);
+  EXPECT_FALSE(packages[1].can_exclude);
+}
+
 TEST_F(OmahaRequestActionTest, OmahaResponseInstallCannotExcludeCheck) {
   request_params_.set_is_install(true);
   request_params_.set_dlc_apps_params(
@@ -3198,7 +3329,7 @@ TEST_F(OmahaRequestActionTest, MiniosCanExcludeCheck) {
 }
 
 TEST_F(OmahaRequestActionTest, OmahaResponseDifferentFp) {
-  SystemState::Get()->update_attempter()->ChangeRepeatedUpdates(true);
+  ASSERT_TRUE(utils::ToggleFeature(kPrefsAllowRepeatedUpdates, true));
 
   // Both fingerprints in the request are different.
   // Request fps: 1.0, 1.1. Response fps: `fp`, `fp2`.
@@ -3214,7 +3345,7 @@ TEST_F(OmahaRequestActionTest, OmahaResponseDifferentFp) {
 }
 
 TEST_F(OmahaRequestActionTest, OmahaResponseSameDlcFp) {
-  SystemState::Get()->update_attempter()->ChangeRepeatedUpdates(true);
+  ASSERT_TRUE(utils::ToggleFeature(kPrefsAllowRepeatedUpdates, true));
   // Set request fingerprints. Same fp in both request and response for Dlc.
   // Request fps: 1.0, `fp2`. Response fps: `fp`, `fp2`.
   request_params_.set_last_fp("1.0");
@@ -3233,7 +3364,7 @@ TEST_F(OmahaRequestActionTest, OmahaResponseSameDlcFp) {
 }
 
 TEST_F(OmahaRequestActionTest, OmahaResponseSameMiniOSFp) {
-  SystemState::Get()->update_attempter()->ChangeRepeatedUpdates(true);
+  ASSERT_TRUE(utils::ToggleFeature(kPrefsAllowRepeatedUpdates, true));
   // Set request fingerprints. Same fp in both request and response for MiniOS.
   // Request fps: 1.0 (platform), `fp2` (minios). Response fps:`fp` (platform),
   // `fp2` (minios).
@@ -3251,7 +3382,7 @@ TEST_F(OmahaRequestActionTest, OmahaResponseSameMiniOSFp) {
 }
 
 TEST_F(OmahaRequestActionTest, OmahaResponseSamePlatformFp) {
-  SystemState::Get()->update_attempter()->ChangeRepeatedUpdates(true);
+  ASSERT_TRUE(utils::ToggleFeature(kPrefsAllowRepeatedUpdates, true));
   // Set request fingerprints. Same fp in both request and response for
   // platform.  Request fps: `fp`, 1.1. Response fps: `fp`, `fp2`.
   request_params_.set_last_fp(fake_update_response_.fp);

@@ -16,7 +16,7 @@
 
 #include "update_engine/update_manager/update_time_restrictions_monitor.h"
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/time/time.h>
 
@@ -35,7 +35,7 @@ const WeeklyTimeInterval* FindNextNearestInterval(
   const WeeklyTimeInterval* result_interval = nullptr;
   // As we are dealing with weekly time here, the maximum duration can be one
   // week.
-  TimeDelta duration_till_next_interval = TimeDelta::FromDays(7);
+  TimeDelta duration_till_next_interval = base::Days(7);
   for (const auto& interval : intervals) {
     if (interval.InRange(now)) {
       return &interval;
@@ -77,8 +77,8 @@ void UpdateTimeRestrictionsMonitor::StartMonitoring() {
     WaitForRestrictedIntervalStarts(*new_intervals);
 
   const bool is_registered = evaluation_context_.RunOnValueChangeOrTimeout(
-      base::Bind(&UpdateTimeRestrictionsMonitor::OnIntervalsChanged,
-                 base::Unretained(this)));
+      base::BindOnce(&UpdateTimeRestrictionsMonitor::OnIntervalsChanged,
+                     base::Unretained(this)));
   DCHECK(is_registered);
 }
 
@@ -96,7 +96,7 @@ void UpdateTimeRestrictionsMonitor::WaitForRestrictedIntervalStarts(
   // If |current_interval| happens right now, set delay to zero.
   const TimeDelta duration_till_start =
       current_interval->InRange(Now())
-          ? TimeDelta::FromMicroseconds(0)
+          ? base::Microseconds(0)
           : Now().GetDurationTo(current_interval->start());
   LOG(INFO) << "Found restricted interval starting at "
             << (SystemState::Get()->clock()->GetWallclockTime() +
@@ -104,8 +104,9 @@ void UpdateTimeRestrictionsMonitor::WaitForRestrictedIntervalStarts(
 
   timeout_event_ = MessageLoop::current()->PostDelayedTask(
       FROM_HERE,
-      base::Bind(&UpdateTimeRestrictionsMonitor::HandleRestrictedIntervalStarts,
-                 weak_ptr_factory_.GetWeakPtr()),
+      base::BindOnce(
+          &UpdateTimeRestrictionsMonitor::HandleRestrictedIntervalStarts,
+          weak_ptr_factory_.GetWeakPtr()),
       duration_till_start);
 }
 

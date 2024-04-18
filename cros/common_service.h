@@ -41,15 +41,11 @@ class UpdateEngineService {
   UpdateEngineService();
   virtual ~UpdateEngineService() = default;
 
-  bool AttemptUpdate(brillo::ErrorPtr* error,
-                     const std::string& in_app_version,
-                     const std::string& in_omaha_url,
-                     int32_t in_flags_as_int,
-                     bool* out_result);
-
   bool Update(brillo::ErrorPtr* error,
               const update_engine::UpdateParams& update_params,
               bool* out_result);
+
+  bool ApplyDeferredUpdate(brillo::ErrorPtr* error, bool shutdown);
 
   // Attempts a DLC module install operation.
   // |omaha_url|: the URL to query for update.
@@ -57,6 +53,9 @@ class UpdateEngineService {
   bool AttemptInstall(brillo::ErrorPtr* error,
                       const std::string& omaha_url,
                       const std::vector<std::string>& dlc_ids);
+
+  bool Install(brillo::ErrorPtr* error,
+               const update_engine::InstallParams& install_params);
 
   bool AttemptRollback(brillo::ErrorPtr* error, bool in_powerwash);
 
@@ -80,6 +79,10 @@ class UpdateEngineService {
   // is reported.
   bool GetStatus(brillo::ErrorPtr* error,
                  update_engine::UpdateEngineStatus* out_status);
+
+  // Overrides the current operation/status of the update engine. Only used for
+  // testing.
+  bool SetStatus(brillo::ErrorPtr* error, update_engine::UpdateStatus status);
 
   // Reboots the device if an update is applied and a reboot is required.
   bool RebootIfNeeded(brillo::ErrorPtr* error);
@@ -146,6 +149,12 @@ class UpdateEngineService {
   bool ToggleFeature(brillo::ErrorPtr* error,
                      const std::string& feature,
                      bool enable);
+
+  // Gets feature value on whether it's enabled or not. Otherwise, this method
+  // returns with an error.
+  bool IsFeatureEnabled(brillo::ErrorPtr* error,
+                        const std::string& feature,
+                        bool* out_enabled);
 
   // Returns the duration since the last successful update, as the
   // duration on the wallclock. Returns an error if the device has not

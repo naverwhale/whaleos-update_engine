@@ -35,6 +35,15 @@ BootControlInterface::Slot BootControlStub::GetCurrentSlot() const {
   return 0;
 }
 
+BootControlInterface::Slot BootControlStub::GetFirstInactiveSlot() const {
+  LOG(ERROR) << __FUNCTION__ << " should never be called.";
+  return 0;
+}
+
+base::FilePath BootControlStub::GetBootDevicePath() const {
+  return base::FilePath{};
+}
+
 bool BootControlStub::GetPartitionDevice(const std::string& partition_name,
                                          BootControlInterface::Slot slot,
                                          bool not_in_payload,
@@ -47,6 +56,16 @@ bool BootControlStub::GetPartitionDevice(const std::string& partition_name,
 bool BootControlStub::GetPartitionDevice(const string& partition_name,
                                          Slot slot,
                                          string* device) const {
+  LOG(ERROR) << __FUNCTION__ << " should never be called.";
+  return false;
+}
+
+bool BootControlStub::GetErrorCounter(Slot slot, int* error_counter) const {
+  LOG(ERROR) << __FUNCTION__ << " should never be called.";
+  return false;
+}
+
+bool BootControlStub::SetErrorCounter(Slot slot, int error_counter) {
   LOG(ERROR) << __FUNCTION__ << " should never be called.";
   return false;
 }
@@ -71,7 +90,7 @@ bool BootControlStub::MarkBootSuccessful() {
 }
 
 bool BootControlStub::MarkBootSuccessfulAsync(
-    base::Callback<void(bool)> callback) {
+    base::OnceCallback<void(bool)> callback) {
   // This is expected to be called on update_engine startup.
   return false;
 }
@@ -106,4 +125,10 @@ bool BootControlStub::SupportsMiniOSPartitions() {
   LOG(ERROR) << __FUNCTION__ << " should never be called.";
   return false;
 }
+
+bool BootControlStub::IsLvmStackEnabled(brillo::LogicalVolumeManager* lvm) {
+  LOG(ERROR) << __FUNCTION__ << " should never be called.";
+  return false;
+}
+
 }  // namespace chromeos_update_engine

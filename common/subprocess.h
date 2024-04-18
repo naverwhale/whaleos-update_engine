@@ -22,12 +22,12 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <base/callback.h>
 #include <base/files/file_descriptor_watcher_posix.h>
+#include <base/functional/callback.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <brillo/asynchronous_signal_handler_interface.h>
 #include <brillo/message_loops/message_loop.h>
 #ifdef __CHROMEOS__
@@ -59,7 +59,7 @@ class Subprocess {
 
   // Callback type used when an async process terminates. It receives the exit
   // code and the stdout output (and stderr if redirected).
-  using ExecCallback = base::Callback<void(int, const std::string&)>;
+  using ExecCallback = base::OnceCallback<void(int, const std::string&)>;
 
   Subprocess() = default;
   Subprocess(const Subprocess&) = delete;
@@ -77,11 +77,11 @@ class Subprocess {
   // know the reader end in the parent. Only stdin, stdout, stderr and the file
   // descriptors in |output_pipes| will be open in the child.
   // Returns the process id of the new launched process or 0 in case of failure.
-  pid_t Exec(const std::vector<std::string>& cmd, const ExecCallback& callback);
+  pid_t Exec(const std::vector<std::string>& cmd, ExecCallback callback);
   pid_t ExecFlags(const std::vector<std::string>& cmd,
                   uint32_t flags,
                   const std::vector<int>& output_pipes,
-                  const ExecCallback& callback);
+                  ExecCallback callback);
 
   // Kills the running process with SIGTERM and ignores the callback.
   void KillExec(pid_t pid);
@@ -118,8 +118,8 @@ class Subprocess {
   FRIEND_TEST(SubprocessTest, CancelTest);
 
   struct SubprocessRecord {
-    explicit SubprocessRecord(const ExecCallback& callback)
-        : callback(callback) {}
+    explicit SubprocessRecord(ExecCallback callback)
+        : callback(std::move(callback)) {}
 
     // The callback supplied by the caller.
     ExecCallback callback;

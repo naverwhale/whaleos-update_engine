@@ -18,7 +18,7 @@
 
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #include <base/strings/stringprintf.h>
@@ -71,29 +71,6 @@ UpdateEngineService::UpdateEngineService() = default;
 
 // org::chromium::UpdateEngineInterfaceInterface methods implementation.
 
-bool UpdateEngineService::AttemptUpdate(ErrorPtr* /* error */,
-                                        const string& in_app_version,
-                                        const string& in_omaha_url,
-                                        int32_t in_flags_as_int,
-                                        bool* out_result) {
-  auto flags = static_cast<UpdateAttemptFlags>(in_flags_as_int);
-  bool non_interactive = (flags & UpdateAttemptFlags::kFlagNonInteractive);
-
-  LOG(INFO) << "Attempt update: app_version=\"" << in_app_version << "\" "
-            << "omaha_url=\"" << in_omaha_url << "\" "
-            << "flags=0x" << std::hex << flags << " "
-            << "interactive=" << (non_interactive ? "no" : "yes");
-
-  update_engine::UpdateParams update_params;
-  update_params.set_app_version(in_app_version);
-  update_params.set_omaha_url(in_omaha_url);
-  update_params.mutable_update_flags()->set_non_interactive(non_interactive);
-
-  *out_result =
-      SystemState::Get()->update_attempter()->CheckForUpdate(update_params);
-  return true;
-}
-
 bool UpdateEngineService::Update(
     ErrorPtr* /* error */,
     const update_engine::UpdateParams& update_params,
@@ -107,13 +84,36 @@ bool UpdateEngineService::Update(
   return true;
 }
 
+bool UpdateEngineService::ApplyDeferredUpdate(ErrorPtr* error, bool shutdown) {
+  if (!SystemState::Get()->update_attempter()->ApplyDeferredUpdate(shutdown)) {
+    LogAndSetError(error, FROM_HERE, "Failed to apply deferred update.");
+    return false;
+  }
+  return true;
+}
+
 bool UpdateEngineService::AttemptInstall(brillo::ErrorPtr* error,
                                          const string& omaha_url,
                                          const vector<string>& dlc_ids) {
-  if (!SystemState::Get()->update_attempter()->CheckForInstall(dlc_ids,
-                                                               omaha_url)) {
+  if (!SystemState::Get()->update_attempter()->CheckForInstall(
+          dlc_ids,
+          omaha_url,
+          /*scaled=*/false)) {
     // TODO(xiaochu): support more detailed error messages.
-    LogAndSetError(error, FROM_HERE, "Could not schedule install operation.");
+    LogAndSetError(error, FROM_HERE, "Could not schedule install.");
+    return false;
+  }
+  return true;
+}
+
+bool UpdateEngineService::Install(
+    brillo::ErrorPtr* error,
+    const update_engine::InstallParams& install_params) {
+  if (!SystemState::Get()->update_attempter()->CheckForInstall(
+          {install_params.id()},
+          install_params.omaha_url(),
+          install_params.scaled())) {
+    LogAndSetError(error, FROM_HERE, "Could not schedule scaled install.");
     return false;
   }
   return true;
@@ -167,6 +167,12 @@ bool UpdateEngineService::GetStatus(ErrorPtr* error,
   return true;
 }
 
+bool UpdateEngineService::SetStatus(brillo::ErrorPtr*,
+                                    update_engine::UpdateStatus status) {
+  SystemState::Get()->update_attempter()->SetStatusAndNotify(status);
+  return true;
+}
+
 bool UpdateEngineService::RebootIfNeeded(ErrorPtr* error) {
   if (!SystemState::Get()->update_attempter()->RebootIfNeeded()) {
     // TODO(dgarrett): Give a more specific error code/reason.
@@ -199,6 +205,12 @@ bool UpdateEngineService::SetChannel(ErrorPtr* error,
                    FROM_HERE,
                    "Cannot set target channel explicitly when channel "
                    "policy/settings is not delegated");
+    return false;
+  }
+
+  if (OmahaRequestParams::IsCommercialChannel(in_target_channel)) {
+    LogAndSetError(
+        error, FROM_HERE, "Cannot set a commercial channel explicitly");
     return false;
   }
 
@@ -341,8 +353,7 @@ bool UpdateEngineService::GetUpdateOverCellularPermission(ErrorPtr* error,
 
   if (connection_manager->IsAllowedConnectionTypesForUpdateSet()) {
     // We have device policy, so ignore the user preferences.
-    *out_allowed = connection_manager->IsUpdateAllowedOver(
-        ConnectionType::kCellular, ConnectionTethering::kUnknown);
+    *out_allowed = connection_manager->IsUpdateAllowedOverMetered();
   } else {
     const auto* prefs = SystemState::Get()->prefs();
     if (!prefs->Exists(kPrefsUpdateOverCellularPermission)) {
@@ -367,21 +378,21 @@ bool UpdateEngineService::GetUpdateOverCellularPermission(ErrorPtr* error,
 bool UpdateEngineService::ToggleFeature(ErrorPtr* error,
                                         const std::string& feature,
                                         bool enable) {
-  if (feature == update_engine::kFeatureRepeatedUpdates) {
-    if (!SystemState::Get()->update_attempter()->ChangeRepeatedUpdates(
-            enable)) {
-      LogAndSetError(error,
-                     FROM_HERE,
-                     string("Error setting AllowRepeatedUpdates to ") +
-                         (enable ? "true" : "false"));
-      return false;
-    }
+  if (SystemState::Get()->update_attempter()->ToggleFeature(feature, enable))
     return true;
-  } else {
-    LogAndSetError(
-        error, FROM_HERE, string("Feature ") + feature + " is not supported");
-    return false;
-  }
+  LogAndSetError(
+      error, FROM_HERE, string("Failed to toggle feature ") + feature);
+  return false;
+}
+
+bool UpdateEngineService::IsFeatureEnabled(ErrorPtr* error,
+                                           const std::string& feature,
+                                           bool* out_enabled) {
+  if (SystemState::Get()->update_attempter()->IsFeatureEnabled(feature,
+                                                               out_enabled))
+    return true;
+  LogAndSetError(error, FROM_HERE, string("Failed to get feature ") + feature);
+  return false;
 }
 
 bool UpdateEngineService::GetDurationSinceUpdate(ErrorPtr* error,

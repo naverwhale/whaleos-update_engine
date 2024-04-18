@@ -40,6 +40,9 @@ class UpdateEngineClient {
   //     Refer to proto defined in system_api.
   virtual bool Update(const update_engine::UpdateParams& update_params) = 0;
 
+  // Applies the deferred update if there is one.
+  virtual bool ApplyDeferredUpdate() = 0;
+
   // Request the update_engine to install a list of DLC modules.
   // |omaha_url|
   //     Force update_engine to look for updates from the given server. Passing
@@ -50,9 +53,12 @@ class UpdateEngineClient {
   //     A list of DLC module IDs.
   virtual bool AttemptInstall(const std::string& omaha_url,
                               const std::vector<std::string>& dlc_ids) = 0;
+  virtual bool Install(const update_engine::InstallParams& install_params) = 0;
 
-  // Same as above but return the entire struct instead.
+  // Returns the entire update engine status struct.
   virtual bool GetStatus(UpdateEngineStatus* out_status) const = 0;
+  // Overrides the current update status. Only used for testing.
+  virtual bool SetStatus(UpdateStatus update_status) const = 0;
 
   // Sets the DLC as active or inactive. When set to active, the ping metadata
   // for the DLC is updated accordingly. When set to inactive, the metadata
@@ -112,6 +118,9 @@ class UpdateEngineClient {
   virtual bool GetLastAttemptError(int32_t* last_attempt_error) const = 0;
 
   virtual bool ToggleFeature(const std::string& feature, bool enable) = 0;
+
+  virtual bool IsFeatureEnabled(const std::string& feature,
+                                bool* out_enabled) = 0;
 
  protected:
   // Use CreateInstance().

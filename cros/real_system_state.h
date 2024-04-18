@@ -27,11 +27,13 @@
 
 #include "update_engine/certificate_checker.h"
 #include "update_engine/common/boot_control_interface.h"
+#include "update_engine/common/call_wrapper_interface.h"
 #include "update_engine/common/clock.h"
 #include "update_engine/common/cros_healthd_interface.h"
 #include "update_engine/common/daemon_state_interface.h"
 #include "update_engine/common/dlcservice_interface.h"
 #include "update_engine/common/hardware_interface.h"
+#include "update_engine/common/hibernate_interface.h"
 #include "update_engine/common/metrics_reporter_interface.h"
 #include "update_engine/common/prefs.h"
 #include "update_engine/cros/connection_manager_interface.h"
@@ -81,6 +83,8 @@ class RealSystemState : public SystemState {
 
   HardwareInterface* hardware() override { return hardware_.get(); }
 
+  HibernateInterface* hibernate() override { return hibernate_.get(); }
+
   MetricsReporterInterface* metrics_reporter() override {
     return &metrics_reporter_;
   }
@@ -113,7 +117,11 @@ class RealSystemState : public SystemState {
 
   DlcServiceInterface* dlcservice() override { return dlcservice_.get(); }
 
+  DlcUtilsInterface* dlc_utils() override { return dlc_utils_.get(); }
+
   CrosHealthdInterface* cros_healthd() override { return cros_healthd_.get(); }
+
+  CallWrapperInterface* call_wrapper() override { return call_wrapper_.get(); }
 
  private:
   // Initializes and sets systems objects that require an initialization
@@ -129,6 +137,9 @@ class RealSystemState : public SystemState {
 
   // Interface for dlcservice.
   std::unique_ptr<DlcServiceInterface> dlcservice_;
+
+  // Interface for dlc_utils.
+  std::unique_ptr<DlcUtilsInterface> dlc_utils_;
 
   // Interface for cros_healthd.
   std::unique_ptr<CrosHealthdInterface> cros_healthd_;
@@ -148,6 +159,9 @@ class RealSystemState : public SystemState {
 
   // Interface for the hardware functions.
   std::unique_ptr<HardwareInterface> hardware_;
+
+  // Interface for hibernate functionality.
+  std::unique_ptr<HibernateInterface> hibernate_;
 
   // The Metrics reporter for reporting UMA stats.
   MetricsReporterOmaha metrics_reporter_;
@@ -177,6 +191,9 @@ class RealSystemState : public SystemState {
   std::unique_ptr<chromeos_update_manager::UpdateManager> update_manager_;
 
   policy::PolicyProvider policy_provider_;
+
+  // Interface for cros_healthd.
+  std::unique_ptr<CallWrapperInterface> call_wrapper_;
 
   // If true, this is the first instance of the update engine since the system
   // rebooted. Important for tracking whether you are running instance of the

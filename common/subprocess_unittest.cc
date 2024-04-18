@@ -25,8 +25,8 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/files/scoped_temp_dir.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 #if BASE_VER < 780000  // Android
@@ -48,7 +48,6 @@
 #include "update_engine/common/test_utils.h"
 #include "update_engine/common/utils.h"
 
-using base::TimeDelta;
 using brillo::MessageLoop;
 using std::string;
 using std::unique_ptr;
@@ -96,7 +95,11 @@ void ExpectedResults(int expected_return_code,
 
 void ExpectedEnvVars(int return_code, const string& output) {
   EXPECT_EQ(0, return_code);
-  const std::set<string> allowed_envs = {"LD_LIBRARY_PATH", "PATH"};
+  const std::set<string> allowed_envs = {"LD_LIBRARY_PATH",
+                                         "PATH",
+                                         "ASAN_OPTIONS",
+                                         "MSAN_OPTIONS",
+                                         "UBSAN_OPTIONS"};
   for (const string& key_value : brillo::string_utils::Split(output, "\n")) {
     auto key_value_pair =
         brillo::string_utils::SplitAtFirst(key_value, "=", true);
@@ -141,14 +144,14 @@ TEST_F(SubprocessTest, InactiveInstancesDontChangeTheSingleton) {
 
 TEST_F(SubprocessTest, SimpleTest) {
   EXPECT_TRUE(subprocess_.Exec({kBinPath "/false"},
-                               base::Bind(&ExpectedResults, 1, "")));
+                               base::BindOnce(&ExpectedResults, 1, "")));
   loop_.Run();
 }
 
 TEST_F(SubprocessTest, EchoTest) {
   EXPECT_TRUE(subprocess_.Exec(
       {kBinPath "/sh", "-c", "echo this is stdout; echo this is stderr >&2"},
-      base::Bind(&ExpectedResults, 0, "this is stdout\nthis is stderr\n")));
+      base::BindOnce(&ExpectedResults, 0, "this is stdout\nthis is stderr\n")));
   loop_.Run();
 }
 
@@ -157,7 +160,7 @@ TEST_F(SubprocessTest, StderrNotIncludedInOutputTest) {
       {kBinPath "/sh", "-c", "echo on stdout; echo on stderr >&2"},
       0,
       {},
-      base::Bind(&ExpectedResults, 0, "on stdout\n")));
+      base::BindOnce(&ExpectedResults, 0, "on stdout\n")));
   loop_.Run();
 }
 
@@ -167,7 +170,8 @@ TEST_F(SubprocessTest, PipeRedirectFdTest) {
       {kBinPath "/sh", "-c", "echo on pipe >&3"},
       0,
       {3},
-      base::Bind(&ExpectedDataOnPipe, &subprocess_, &pid, 3, "on pipe\n", 0));
+      base::BindOnce(
+          &ExpectedDataOnPipe, &subprocess_, &pid, 3, "on pipe\n", 0));
   EXPECT_NE(0, pid);
 
   // Wrong file descriptor values should return -1.
@@ -188,13 +192,13 @@ TEST_F(SubprocessTest, PipeClosedWhenNotRedirectedTest) {
       "fstat",
       std::to_string(pipe.writer)};
   EXPECT_TRUE(subprocess_.ExecFlags(
-      cmd, 0, {}, base::Bind(&ExpectedResults, EBADF, "")));
+      cmd, 0, {}, base::BindOnce(&ExpectedResults, EBADF, "")));
   loop_.Run();
 }
 
 TEST_F(SubprocessTest, EnvVarsAreFiltered) {
   EXPECT_TRUE(
-      subprocess_.Exec({kUsrBinPath "/env"}, base::Bind(&ExpectedEnvVars)));
+      subprocess_.Exec({kUsrBinPath "/env"}, base::BindOnce(&ExpectedEnvVars)));
   loop_.Run();
 }
 
@@ -258,7 +262,7 @@ TEST_F(SubprocessTest, CancelTest) {
           "exit 1",
           fifo_path.c_str(),
           fifo_path.c_str())};
-  uint32_t tag = Subprocess::Get().Exec(cmd, base::Bind(&CallbackBad));
+  uint32_t tag = Subprocess::Get().Exec(cmd, base::BindOnce(&CallbackBad));
   EXPECT_NE(0U, tag);
 
   int fifo_fd = HANDLE_EINTR(open(fifo_path.c_str(), O_RDONLY));
@@ -266,7 +270,7 @@ TEST_F(SubprocessTest, CancelTest) {
 
   watcher_ = base::FileDescriptorWatcher::WatchReadable(
       fifo_fd,
-      base::Bind(
+      base::BindRepeating(
           [](unique_ptr<base::FileDescriptorWatcher::Controller>* watcher,
              int fifo_fd,
              uint32_t tag) {
@@ -285,7 +289,7 @@ TEST_F(SubprocessTest, CancelTest) {
   // This test would leak a callback that runs when the child process exits
   // unless we wait for it to run.
   brillo::MessageLoopRunUntil(
-      &loop_, TimeDelta::FromSeconds(20), base::Bind([] {
+      &loop_, base::Seconds(20), base::BindRepeating([] {
         return Subprocess::Get().subprocess_records_.empty();
       }));
   EXPECT_TRUE(Subprocess::Get().subprocess_records_.empty());

@@ -18,7 +18,7 @@
 
 #include <sysexits.h>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/location.h>
 #include <base/logging.h>
 
@@ -52,8 +52,8 @@ int DaemonChromeOS::OnInit() {
   dbus_adaptor_.reset(new UpdateEngineAdaptor());
   SystemState::Get()->update_attempter()->AddObserver(dbus_adaptor_.get());
 
-  dbus_adaptor_->RegisterAsync(
-      base::Bind(&DaemonChromeOS::OnDBusRegistered, base::Unretained(this)));
+  dbus_adaptor_->RegisterAsync(base::BindOnce(&DaemonChromeOS::OnDBusRegistered,
+                                              base::Unretained(this)));
   LOG(INFO) << "Waiting for DBus object to be registered.";
   return EX_OK;
 }
@@ -75,28 +75,18 @@ void DaemonChromeOS::OnDBusRegistered(bool succeeded) {
     return;
   }
 
-  // Need to wait for DBus ownership as bootstraping requires requesting
-  // `cros_healthd` DBus API calls.
-  auto* cros_healthd = SystemState::Get()->cros_healthd();
-  if (!cros_healthd->Init()) {
-    LOG(ERROR) << "Failed to initialize cros_healthd connection.";
-    SystemState::Get()->update_attempter()->StartUpdater();
-  } else {
-    LOG(INFO) << "Requesting telemetry info from cros_healthd.";
-    // Update the telemetry information before starting the updater, to request
-    // once and continue caching on boot.
-    cros_healthd->ProbeTelemetryInfo(
-        {
-            TelemetryCategoryEnum::kNonRemovableBlockDevices,
-            TelemetryCategoryEnum::kCpu,
-            TelemetryCategoryEnum::kMemory,
-            TelemetryCategoryEnum::kSystem2,
-            TelemetryCategoryEnum::kBus,
-        },
-        base::BindOnce([](const TelemetryInfo&) {
-          SystemState::Get()->update_attempter()->StartUpdater();
-        }));
-  }
+  // Update the telemetry information before starting the updater, to request
+  // once and continue caching on boot.
+  SystemState::Get()->cros_healthd()->ProbeTelemetryInfo(
+      {
+          TelemetryCategoryEnum::kNonRemovableBlockDevices,
+          TelemetryCategoryEnum::kCpu,
+          TelemetryCategoryEnum::kMemory,
+          TelemetryCategoryEnum::kSystem,
+          TelemetryCategoryEnum::kBus,
+      },
+      base::BindOnce(
+          []() { SystemState::Get()->update_attempter()->StartUpdater(); }));
 }
 
 }  // namespace chromeos_update_engine

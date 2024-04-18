@@ -17,6 +17,9 @@
 #include "update_engine/cros/boot_control_chromeos.h"
 
 #include <base/strings/stringprintf.h>
+#include <brillo/blkdev_utils/lvm.h>
+#include <brillo/blkdev_utils/lvm_device.h>
+#include <brillo/blkdev_utils/mock_lvm.h>
 #include <gtest/gtest.h>
 
 using std::string;
@@ -34,6 +37,13 @@ class BootControlChromeOSTest : public ::testing::Test {
 
   BootControlChromeOS bootctl_;  // BootControlChromeOS under test.
 };
+
+TEST_F(BootControlChromeOSTest, GetFirstInactiveSlot) {
+  bootctl_.current_slot_ = 0;
+  EXPECT_EQ(1, bootctl_.GetFirstInactiveSlot());
+  bootctl_.current_slot_ = 1;
+  EXPECT_EQ(0, bootctl_.GetFirstInactiveSlot());
+}
 
 TEST_F(BootControlChromeOSTest, SysfsBlockDeviceTest) {
   EXPECT_EQ("/sys/block/sda", bootctl_.SysfsBlockDevice("/dev/sda"));
@@ -143,5 +153,29 @@ TEST_F(BootControlChromeOSTest, GetMiniOSVersionTest) {
   output = "cros_minios_version" + value;
   EXPECT_FALSE(bootctl_.GetMiniOSVersion(output, &value));
 }
+
+#if USE_LVM_STATEFUL_PARTITION
+TEST_F(BootControlChromeOSTest, IsLvmStackEnabledTest) {
+  std::optional<brillo::PhysicalVolume> opt;
+  opt = brillo::PhysicalVolume(base::FilePath("/foo/bar"), nullptr);
+  brillo::MockLogicalVolumeManager mock_lvm;
+  EXPECT_CALL(mock_lvm, GetPhysicalVolume(_)).WillOnce(Return(opt));
+  EXPECT_TRUE(bootctl_.IsLvmStackEnabled(&mock_lvm));
+
+  // Check caching too.
+  EXPECT_TRUE(bootctl_.IsLvmStackEnabled(&mock_lvm));
+}
+
+TEST_F(BootControlChromeOSTest, IsLvmStackEnabledInvalidPhysicalVolumeTest) {
+  std::optional<brillo::PhysicalVolume> opt;
+  opt = brillo::PhysicalVolume(base::FilePath(), nullptr);
+  brillo::MockLogicalVolumeManager mock_lvm;
+  EXPECT_CALL(mock_lvm, GetPhysicalVolume(_)).WillOnce(Return(opt));
+  EXPECT_FALSE(bootctl_.IsLvmStackEnabled(&mock_lvm));
+
+  // Check caching too.
+  EXPECT_FALSE(bootctl_.IsLvmStackEnabled(&mock_lvm));
+}
+#endif  // USE_LVM_STATEFUL_PARTITION
 
 }  // namespace chromeos_update_engine

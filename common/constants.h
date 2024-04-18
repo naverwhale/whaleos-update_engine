@@ -17,6 +17,10 @@
 #ifndef UPDATE_ENGINE_COMMON_CONSTANTS_H_
 #define UPDATE_ENGINE_COMMON_CONSTANTS_H_
 
+#include <stdint.h>
+
+#include <base/time/time.h>
+
 namespace chromeos_update_engine {
 
 // The root path of all exclusion prefs.
@@ -113,6 +117,8 @@ extern const char kPrefsVerityWritten[];
 extern const char kPrefsWallClockScatteringWaitPeriod[];
 extern const char kPrefsWallClockStagingWaitPeriod[];
 extern const char kPrefsManifestBytes[];
+extern const char kPrefsConsumerAutoUpdateDisabled[];
+extern const char kPrefsDeferredUpdateCompleted[];
 
 // Keys used when storing and loading payload properties.
 extern const char kPayloadPropertyFileSize[];
@@ -164,17 +170,17 @@ const int kMaxP2PAttempts = 10;
 
 // Maximum wallclock time we allow attempting to update using p2p for
 // the same update payload - five days.
-const int kMaxP2PAttemptTimeSeconds = 5 * 24 * 60 * 60;
+constexpr base::TimeDelta kMaxP2PAttemptTime = base::Days(5);
 
 // The maximum amount of time to spend waiting for p2p-client(1) to
 // return while waiting in line to use the LAN - six hours.
-const int kMaxP2PNetworkWaitTimeSeconds = 6 * 60 * 60;
+constexpr base::TimeDelta kMaxP2PNetworkWaitTime = base::Hours(6);
 
 // The maximum number of payload files to keep in /var/cache/p2p.
 const int kMaxP2PFilesToKeep = 3;
 
 // The maximum number of days to keep a p2p file;
-const int kMaxP2PFileAgeDays = 5;
+constexpr base::TimeDelta kMaxP2PFileAge = base::Days(5);
 
 // The default number of UMA buckets for metrics.
 const int kNumDefaultUmaBuckets = 50;
@@ -225,6 +231,20 @@ const int kDownloadP2PConnectTimeoutSeconds = 5;
 
 // Size in bytes of SHA256 hash.
 const int kSHA256Size = 32;
+
+// Limit on the number of consecutive updates.
+const int64_t kConsecutiveUpdateLimit = 3;
+
+// Channel constants.
+constexpr const char kCanaryChannel[] = "canary-channel";
+constexpr const char kDevChannel[] = "dev-channel";
+constexpr const char kBetaChannel[] = "beta-channel";
+constexpr const char kStableChannel[] = "stable-channel";
+constexpr const char kLtcChannel[] = "ltc-channel";
+constexpr const char kLtsChannel[] = "lts-channel";
+
+// CrOS GPT constants.
+constexpr int kErrorCounterZeroValue = 0;
 
 }  // namespace chromeos_update_engine
 

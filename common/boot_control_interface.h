@@ -22,8 +22,9 @@
 #include <string>
 #include <vector>
 
-#include <base/callback.h>
-#include <base/macros.h>
+#include <base/files/file_path.h>
+#include <base/functional/callback.h>
+#include <brillo/blkdev_utils/lvm.h>
 
 #include "update_engine/common/dynamic_partition_control_interface.h"
 #include "update_engine/update_metadata.pb.h"
@@ -56,6 +57,14 @@ class BootControlInterface {
   // and return kInvalidSlot.
   virtual Slot GetCurrentSlot() const = 0;
 
+  // Return the first slot where we are not running the system from. On success,
+  // the result is a number between 0 and GetNumSlots() - 1, will also not be
+  // equivalent to `GetCurrentSlot()`. Otherwise will return `kInvalidSlot`.
+  virtual Slot GetFirstInactiveSlot() const = 0;
+
+  // Returns the boot device path. Empty path on error.
+  virtual base::FilePath GetBootDevicePath() const = 0;
+
   // Determines the block device for the given partition name and slot number.
   // The |slot| number must be between 0 and GetNumSlots() - 1 and the
   // |partition_name| is a platform-specific name that identifies a partition on
@@ -77,6 +86,12 @@ class BootControlInterface {
   virtual bool GetPartitionDevice(const std::string& partition_name,
                                   Slot slot,
                                   std::string* device) const = 0;
+
+  // Returns the error counter for the given slot's. Returns false on error.
+  virtual bool GetErrorCounter(Slot slot, int* error_counter) const = 0;
+
+  // Sets the given `error_counter`. Returns false on error.
+  virtual bool SetErrorCounter(Slot slot, int error_counter) = 0;
 
   // Returns whether the passed |slot| is marked as bootable. Returns false if
   // the slot is invalid.
@@ -100,7 +115,8 @@ class BootControlInterface {
   // flags are modified. Returns false if it was not able to schedule the
   // operation, otherwise, returns true and calls the |callback| with the result
   // of the operation.
-  virtual bool MarkBootSuccessfulAsync(base::Callback<void(bool)> callback) = 0;
+  virtual bool MarkBootSuccessfulAsync(
+      base::OnceCallback<void(bool)> callback) = 0;
 
   // Check if |slot| is marked boot successfully.
   virtual bool IsSlotMarkedSuccessful(Slot slot) const = 0;
@@ -123,6 +139,9 @@ class BootControlInterface {
 
   // Returns whether MINIOS-A and B partitions exist on the device.
   virtual bool SupportsMiniOSPartitions() = 0;
+
+  // Returns true if the LVM stack is enabled.
+  virtual bool IsLvmStackEnabled(brillo::LogicalVolumeManager* lvm) = 0;
 
   // Return a human-readable slot name used for logging.
   static std::string SlotName(Slot slot) {

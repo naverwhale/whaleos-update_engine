@@ -25,9 +25,9 @@
 #include <utility>
 #include <vector>
 
-#include <base/bind.h>
-#include <base/guid.h>
+#include <base/functional/bind.h>
 #include <base/time/time.h>
+#include <base/uuid.h>
 #include <gtest/gtest_prod.h>  // for FRIEND_TEST
 
 #include "update_engine/certificate_checker.h"
@@ -41,6 +41,7 @@
 #include "update_engine/common/service_observer_interface.h"
 #include "update_engine/common/system_state.h"
 #include "update_engine/cros/chrome_browser_proxy_resolver.h"
+#include "update_engine/cros/install_action.h"
 #include "update_engine/cros/omaha_request_builder_xml.h"
 #include "update_engine/cros/omaha_request_params.h"
 #include "update_engine/cros/omaha_response_handler_action.h"
@@ -56,12 +57,24 @@ class PolicyProvider;
 
 namespace chromeos_update_engine {
 
+// The different types of top level operations that are processed through.
+enum class ProcessMode {
+  UPDATE,
+  INSTALL,
+  SCALED_INSTALL,
+};
+
 class UpdateAttempter : public ActionProcessorDelegate,
                         public DownloadActionDelegate,
                         public CertificateChecker::Observer,
+                        public InstallActionDelegate,
                         public PostinstallRunnerAction::DelegateInterface,
                         public DaemonStateInterface {
  public:
+  struct ScheduleUpdatesParams {
+    bool force_fw_update{false};
+  };
+
   using UpdateStatus = update_engine::UpdateStatus;
   static const int kMaxDeltaUpdateFailures;
 
@@ -79,11 +92,16 @@ class UpdateAttempter : public ActionProcessorDelegate,
 
   // Initiates scheduling of update checks.
   // Returns true if update check is scheduled.
-  virtual bool ScheduleUpdates();
+  virtual bool ScheduleUpdates(const ScheduleUpdatesParams& params = {
+                                   .force_fw_update = false,
+                               });
 
   // Checks for update and, if a newer version is available, attempts to update
   // the system.
   virtual void Update(const chromeos_update_manager::UpdateCheckParams& params);
+
+  // Performs a scaled install of a DLC.
+  virtual void Install();
 
   // ActionProcessorDelegate methods:
   void ProcessingDone(const ActionProcessor* processor,
@@ -108,10 +126,13 @@ class UpdateAttempter : public ActionProcessorDelegate,
 
   // Resets the boot slot and update markers to invalidate a previously existing
   // update if one is available.
-  void InvalidateUpdate();
+  bool InvalidateUpdate();
 
   // Returns the current status in the out param. Returns true on success.
   virtual bool GetStatus(update_engine::UpdateEngineStatus* out_status);
+
+  // Sets the status to the given status and notifies a status update over dbus.
+  void SetStatusAndNotify(UpdateStatus status);
 
   UpdateStatus status() const { return status_; }
 
@@ -139,9 +160,16 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // update was already in progress.
   virtual bool CheckForUpdate(const update_engine::UpdateParams& update_params);
 
+  // This is the internal entry point to apply a deferred update, will return
+  // false if there wasn't a deferred update to apply or on failure. When
+  // `shutdown` is set to true, shutdown instead of rebooting after applying the
+  // update.
+  virtual bool ApplyDeferredUpdate(bool shutdown);
+
   // This is the version of CheckForUpdate called by AttemptInstall API.
   virtual bool CheckForInstall(const std::vector<std::string>& dlc_ids,
-                               const std::string& omaha_url);
+                               const std::string& omaha_url,
+                               bool scaled = false);
 
   // This is the internal entry point for going through a rollback. This will
   // attempt to run the postinstall on the non-active partition and set it as
@@ -161,16 +189,27 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // UPDATED_NEED_REBOOT. Returns true on success, false otherwise.
   bool RebootIfNeeded();
 
+  // Initiates a shutdown after applied the deferred update. Returns true on
+  // success, false otherwise.
+  bool ShutdownIfNeeded();
+
   // Sets the DLC as active or inactive. See chromeos/common_service.h
   virtual bool SetDlcActiveValue(bool is_active, const std::string& dlc_id);
+
+  // Broadcasts the download/install progress.
+  void ProgressUpdate(uint64_t bytes_received, uint64_t total);
 
   // DownloadActionDelegate methods:
   void BytesReceived(uint64_t bytes_progressed,
                      uint64_t bytes_received,
                      uint64_t total) override;
 
-  // Returns that the update should be canceled when the download channel was
-  // changed.
+  // InstallActionDelegate methods:
+  void BytesReceived(uint64_t bytes_received, uint64_t total) override;
+
+  // Returns if an in-progress update should be cancelled.
+  // Returns true if a download channel was changed or if updates are disabled
+  // by the enterprise policy.
   bool ShouldCancel(ErrorCode* cancel_reason) override;
 
   // Resets the update status. If there is an a valid update complete marker,
@@ -211,6 +250,10 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // This will return an empty string otherwise.
   const std::string& GetPrevVersion() const { return prev_version_; }
 
+  const std::string& GetNewVersion() const { return new_version_; }
+  const uint64_t GetTotal() const { return new_payload_size_; }
+  const uint64_t GetDownloaded() const { return bytes_received_; }
+
   // Returns the number of consecutive failed update checks.
   virtual unsigned int consecutive_failed_update_checks() const {
     return consecutive_failed_update_checks_;
@@ -229,7 +272,7 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // Note that only one callback can be set, so effectively at most one client
   // can be notified.
   virtual void set_forced_update_pending_callback(
-      base::Callback<void(bool, bool)>* callback) {
+      base::RepeatingCallback<void(bool, bool)>* callback) {
     forced_update_pending_callback_.reset(callback);
   }
 
@@ -239,13 +282,19 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // 'cros flash' to function properly).
   bool IsAnyUpdateSourceAllowed() const;
 
-  // Changes the reapeated updates flag based on the feature value. Deletes pref
-  // if feature is false. Returns false if unable to store the change.
-  bool ChangeRepeatedUpdates(bool enable);
-
   // Returns whether repeated updates are enabled. Defaults to true if the pref
   // is unset or unable to be read.
-  bool IsRepeatedUpdatesEnabled();
+  virtual bool IsRepeatedUpdatesEnabled();
+
+  // Toggles a feature managed by update_engine and broadcasts the update_engine
+  // status out to all observers.
+  bool ToggleFeature(const std::string& feature, bool enable);
+
+  // Returns the value of the feature managed by update_engine.
+  bool IsFeatureEnabled(const std::string& feature, bool* out_enabled) const;
+
+  // Triggers the rootfs scanning for integrity checking.
+  virtual void RootfsIntegrityCheck() const;
 
   // |DaemonStateInterface| overrides.
   bool StartUpdater() override;
@@ -301,6 +350,7 @@ class UpdateAttempter : public ActionProcessorDelegate,
   FRIEND_TEST(UpdateAttempterTest, ReportDailyMetrics);
   FRIEND_TEST(UpdateAttempterTest, RollbackNotAllowed);
   FRIEND_TEST(UpdateAttempterTest, RollbackAfterInstall);
+  FRIEND_TEST(UpdateAttempterTest, RollbackAfterScaledInstall);
   FRIEND_TEST(UpdateAttempterTest, RollbackAllowed);
   FRIEND_TEST(UpdateAttempterTest, RollbackAllowedSetAndReset);
   FRIEND_TEST(UpdateAttempterTest, ChannelDowngradeNoRollback);
@@ -318,6 +368,7 @@ class UpdateAttempter : public ActionProcessorDelegate,
   FRIEND_TEST(UpdateAttempterTest, TargetChannelHintSetAndReset);
   FRIEND_TEST(UpdateAttempterTest, TargetVersionPrefixSetAndReset);
   FRIEND_TEST(UpdateAttempterTest, UpdateAfterInstall);
+  FRIEND_TEST(UpdateAttempterTest, UpdateAfterScaledInstall);
   FRIEND_TEST(UpdateAttempterTest, UpdateFlagsCachedAtUpdateStart);
   FRIEND_TEST(UpdateAttempterTest, UpdateDeferredByPolicyTest);
   FRIEND_TEST(UpdateAttempterTest, UpdateIsNotRunningWhenUpdateAvailable);
@@ -326,11 +377,37 @@ class UpdateAttempter : public ActionProcessorDelegate,
   FRIEND_TEST(UpdateAttempterTest, MoveToPrefs);
   FRIEND_TEST(UpdateAttempterTest, FirstUpdateBeforeReboot);
   FRIEND_TEST(UpdateAttempterTest, InvalidateLastUpdate);
+  FRIEND_TEST(UpdateAttempterTest, InvalidateLastPowerwashUpdate);
   FRIEND_TEST(UpdateAttempterTest, ConsecutiveUpdateBeforeRebootSuccess);
+  FRIEND_TEST(UpdateAttempterTest, ConsecutiveUpdateBeforeRebootLimited);
   FRIEND_TEST(UpdateAttempterTest, ConsecutiveUpdateFailureMetric);
   FRIEND_TEST(UpdateAttempterTest, ResetUpdatePrefs);
   FRIEND_TEST(UpdateAttempterTest, ProcessingDoneSkipApplying);
-
+  FRIEND_TEST(UpdateAttempterTest, InstallZeroDlcTest);
+  FRIEND_TEST(UpdateAttempterTest, InstallSingleDlcTest);
+  FRIEND_TEST(UpdateAttempterTest, InstallMultiDlcTest);
+  FRIEND_TEST(UpdateAttempterTest, AfterRestartUpdateInvalidationScheduled);
+  FRIEND_TEST(UpdateAttempterTest,
+              AfterRestartNoInvalidationScheduledIfNoUpdate);
+  FRIEND_TEST(UpdateAttempterTest,
+              AfterRestartNoInvalidationScheduledIfDeferredUpdate);
+  FRIEND_TEST(UpdateAttempterTest, AfterRestartInvalidatesUpdate);
+  FRIEND_TEST(UpdateAttempterTest, AfterRestartSubscribesInvalidatesUpdate);
+  FRIEND_TEST(UpdateAttempterTest,
+              AfterRestartSkipsUpdateInvalidationIfNonEnterprise);
+  FRIEND_TEST(UpdateAttempterTest,
+              AfterRestartSkipsUpdateInvalidationIfNotIdle);
+  FRIEND_TEST(UpdateAttempterTest, AfterUpdateInvalidatesUpdate);
+  FRIEND_TEST(UpdateAttempterTest, AfterUpdateInvalidatesUpdateMetrics);
+  FRIEND_TEST(UpdateAttempterTest, AfterUpdateInvalidatesUpdateFailureMetrics);
+  FRIEND_TEST(UpdateAttempterTest, AfterUpdateSubscribesInvalidatesUpdate);
+  FRIEND_TEST(UpdateAttempterTest,
+              AfterUpdateSkipsUpdateInvalidationIfNonEnterprise);
+  FRIEND_TEST(UpdateAttempterTest,
+              AfterUpdateSkipsInvalidationIfDeferredUpdates);
+  FRIEND_TEST(UpdateAttempterTest, AfterUpdateSkipsUpdateInvalidationIfNonIdle);
+  FRIEND_TEST(UpdateAttempterTest, AfterRepeatedUpdateInvalidatesUpdate);
+  FRIEND_TEST(UpdateAttempterTest, AfterRepeatedInvalidatesUpdateOnError);
   // Returns the special flags to be added to ErrorCode values based on the
   // parameters used in the current update attempt.
   uint32_t GetErrorCodeFlags();
@@ -356,9 +433,6 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // Calculates and reports the age of the currently running OS. This
   // is defined as the age of the /etc/lsb-release file.
   void ReportOSAge();
-
-  // Sets the status to the given status and notifies a status update over dbus.
-  void SetStatusAndNotify(UpdateStatus status);
 
   // Creates an error event object in |error_event_| to be included in an
   // OmahaRequestAction once the current action processor is done.
@@ -415,7 +489,8 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // Helper method of Update() to construct the sequence of actions to
   // be performed for an update check. Please refer to
   // Update() method for the meaning of the parameters.
-  void BuildUpdateActions(bool interactive);
+  void BuildUpdateActions(
+      const chromeos_update_manager::UpdateCheckParams& params);
 
   // Decrements the count in the kUpdateCheckCountFilePath.
   // Returns True if successfully decremented, false otherwise.
@@ -446,6 +521,10 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // Reboots the system directly by calling /sbin/shutdown. Returns true on
   // success.
   bool RebootDirectly();
+
+  // Shutdown the system directly by calling /sbin/shutdown. Returns true on
+  // success.
+  bool ShutdownDirectly();
 
   // Callback for the async update check allowed policy request. If |status| is
   // |EvalStatus::kSucceeded|, either runs or suppresses periodic update checks,
@@ -499,6 +578,24 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // which had "noupdate" in the Omaha response.
   std::vector<std::string> GetSuccessfulDlcIds();
 
+  void OnRootfsIntegrityCheck(int ret_code, const std::string& output) const;
+
+  // Schedules a policy request to check and subscribe to the enterprise signals
+  // that indicate if we should invalidate a pending update.
+  // Currently the only source of the signal is the
+  // `EnterpriseUpdateDisabledPolicyImpl` policy.
+  // Returns false if already scheduled or failed to schedule.
+  bool ScheduleEnterpriseUpdateInvalidationCheck();
+
+  // Used as a policy request callback for
+  // `ScheduleEnterpriseUpdateInvalidationCheck`.
+  // Invalidates pending updates on the enterprise invalidation signal and if
+  // the update attempter is in the UpdateStatus::UPDATED_NEED_REBOOT state.
+  // `status` values are expected to be semantically similar to
+  // `EnterpriseUpdateDisabledPolicyImpl` policy.
+  void OnEnterpriseUpdateInvalidationCheck(
+      chromeos_update_manager::EvalStatus status);
+
   // Last status notification timestamp used for throttling. Use monotonic
   // TimeTicks to ensure that notifications are sent even if the system clock is
   // set back in the middle of an update.
@@ -548,6 +645,8 @@ class UpdateAttempter : public ActionProcessorDelegate,
   std::string prev_version_;
   std::string new_version_ = "0.0.0.0";
   uint64_t new_payload_size_ = 0;
+  uint64_t bytes_received_ = 0;
+
   // Flags influencing all periodic update checks
   update_engine::UpdateFlags update_flags_;
   // Flags influencing the currently in-progress check (cached at the start of
@@ -581,11 +680,16 @@ class UpdateAttempter : public ActionProcessorDelegate,
   // Tracks whether we have scheduled update checks.
   bool waiting_for_scheduled_check_ = false;
 
+  // Tracks if the enterprise update invalidation check is already scheduled by
+  // `ScheduleEnterpriseUpdateInvalidationCheck`.
+  // Needed so that we only have at most one scheduled check.
+  bool enterprise_update_invalidation_check_scheduled_ = 0;
+
   // A callback to use when a forced update request is either received (true) or
   // cleared by an update attempt (false). The second argument indicates whether
   // this is an interactive update, and its value is significant iff the first
   // argument is true.
-  std::unique_ptr<base::Callback<void(bool, bool)>>
+  std::unique_ptr<base::RepeatingCallback<void(bool, bool)>>
       forced_update_pending_callback_;
 
   // The |app_version| and |omaha_url| parameters received during the latest
@@ -596,9 +700,9 @@ class UpdateAttempter : public ActionProcessorDelegate,
 
   // A list of DLC module IDs.
   std::vector<std::string> dlc_ids_;
-  // Whether the operation is install (write to the current slot not the
-  // inactive slot).
-  bool is_install_;
+
+  // What type of operation is happening/scheduled.
+  ProcessMode pm_{ProcessMode::UPDATE};
 
   // If this is not TimeDelta(), then that means staging is turned on.
   base::TimeDelta staging_wait_time_;

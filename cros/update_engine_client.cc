@@ -22,14 +22,14 @@
 #include <string>
 #include <vector>
 
-#include <base/bind.h>
 #include <base/command_line.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
-#include <base/macros.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
+#include <base/task/single_thread_task_runner.h>
 #include <base/threading/platform_thread.h>
-#include <base/threading/thread_task_runner_handle.h>
+#include <base/time/time.h>
 #include <brillo/daemons/daemon.h>
 #include <brillo/flag_helper.h>
 #include <brillo/key_value_store.h>
@@ -64,7 +64,7 @@ const int kContinueRunning = -1;
 // The ShowStatus request will be retried `kShowStatusRetryCount` times at
 // `kShowStatusRetryInterval` second intervals on failure.
 const int kShowStatusRetryCount = 30;
-const int kShowStatusRetryIntervalInSeconds = 2;
+constexpr base::TimeDelta kShowStatusRetryInterval = base::Seconds(2);
 
 class UpdateEngineClient : public brillo::Daemon {
  public:
@@ -89,10 +89,10 @@ class UpdateEngineClient : public brillo::Daemon {
 
     // We can't call QuitWithExitCode from OnInit(), so we delay the execution
     // of the ProcessFlags method after the Daemon initialization is done.
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
-        base::Bind(&UpdateEngineClient::ProcessFlagsAndExit,
-                   base::Unretained(this)));
+        base::BindOnce(&UpdateEngineClient::ProcessFlagsAndExit,
+                       base::Unretained(this)));
     return EX_OK;
   }
 
@@ -164,8 +164,7 @@ bool UpdateEngineClient::ShowStatus() {
            " the update-engine service is needed."
            " Will try "
         << retry_count << " more times!";
-    base::PlatformThread::Sleep(
-        base::TimeDelta::FromSeconds(kShowStatusRetryIntervalInSeconds));
+    base::PlatformThread::Sleep(kShowStatusRetryInterval);
   }
 
   printf("%s", UpdateEngineStatusToString(status).c_str());
@@ -219,6 +218,38 @@ void UpdateWaitHandler::HandleStatusUpdate(const UpdateEngineStatus& status) {
   }
 }
 
+class InstallWaitHandler : public ExitingStatusUpdateHandler {
+ public:
+  explicit InstallWaitHandler(update_engine::UpdateEngineClient* client)
+      : client_(client) {}
+
+  ~InstallWaitHandler() override = default;
+
+  void HandleStatusUpdate(const UpdateEngineStatus& status) override;
+
+ private:
+  update_engine::UpdateEngineClient* client_;
+};
+
+void InstallWaitHandler::HandleStatusUpdate(const UpdateEngineStatus& status) {
+  if (status.status == UpdateStatus::IDLE) {
+    auto success = static_cast<int>(ErrorCode::kSuccess);
+    auto last_attempt_error = success;
+    ErrorCode code = ErrorCode::kSuccess;
+    if (client_ && client_->GetLastAttemptError(&last_attempt_error))
+      code = static_cast<ErrorCode>(last_attempt_error);
+
+    if (last_attempt_error == success) {
+      LOG(INFO) << "Install succeeded.";
+      exit(0);
+    }
+    LOG(ERROR) << "Install failed, current operation is "
+               << UpdateStatusToString(status.status) << ", last error code is "
+               << ErrorCodeToString(code) << "(" << last_attempt_error << ")";
+    exit(1);
+  }
+}
+
 int UpdateEngineClient::ProcessFlags() {
   DEFINE_string(app_version, "", "Force the current app version.");
   DEFINE_string(channel,
@@ -227,12 +258,18 @@ int UpdateEngineClient::ProcessFlags() {
                 "target channel is more stable than the current channel unless "
                 "--nopowerwash is specified.");
   DEFINE_bool(check_for_update, false, "Initiate check for updates.");
+  DEFINE_bool(apply_deferred_update,
+              false,
+              "Apply the deferred update if there is one.");
   DEFINE_string(
       cohort_hint, "", "Set the current cohort hint to the passed value.");
+  DEFINE_string(dlc, "", "The ID/name of the DLC to install.");
   DEFINE_bool(follow,
               false,
               "Wait for any update operations to complete."
               "Exit status is 0 if the update succeeded, and 1 otherwise.");
+  DEFINE_bool(install, false, "Set to perform an installation.");
+  DEFINE_bool(scaled, false, "Set to perform a scaled installation.");
   DEFINE_bool(interactive, true, "Mark the update request as interactive.");
   DEFINE_string(omaha_url, "", "The URL of the Omaha update server.");
   DEFINE_string(p2p_update,
@@ -298,6 +335,13 @@ int UpdateEngineClient::ProcessFlags() {
   DEFINE_bool(skip_applying,
               false,
               "Skip applying updates, only check if there are updates.");
+  DEFINE_string(is_feature_enabled, "", "Shows the current value of feature.");
+  DEFINE_int32(set_status,
+               -1,
+               "Override status of the update engine with a value in"
+               "Operation of update_engine.proto. Used for testing.");
+  DEFINE_bool(
+      force_fw_update, false, "Forces a fw update with the OS update check.");
 
   // Boilerplate init commands.
   base::CommandLine::Init(argc_, argv_);
@@ -313,6 +357,24 @@ int UpdateEngineClient::ProcessFlags() {
     return 1;
   }
 
+  if (FLAGS_set_status != -1) {
+    const int32_t max_value = static_cast<int32_t>(UpdateStatus::MAX);
+    if (FLAGS_set_status < 0 || FLAGS_set_status > max_value) {
+      LOG(ERROR) << "Passed value is not a valid update state."
+                 << "Needs to be between 0 and " << max_value << ".";
+      return 1;
+    }
+
+    if (!client_->SetStatus(static_cast<UpdateStatus>(FLAGS_set_status))) {
+      LOG(ERROR) << "Setting update status failed.";
+      return 1;
+    }
+    LOG(INFO) << "Overriding update status to "
+              << chromeos_update_engine::UpdateStatusToString(
+                     static_cast<UpdateStatus>(FLAGS_set_status));
+    return 0;
+  }
+
   // Update the status if requested.
   if (FLAGS_reset_status) {
     LOG(INFO) << "Setting Update Engine status to idle ...";
@@ -320,7 +382,7 @@ int UpdateEngineClient::ProcessFlags() {
     if (client_->ResetStatus()) {
       LOG(INFO) << "ResetStatus succeeded; to undo partition table changes "
                    "run:\n"
-                   "(D=$(rootdev -d) P=$(rootdev -s); cgpt p -i$(($(echo "
+                   "(D=$(rootdev -s -d) P=$(rootdev -s); cgpt p -i$(($(echo "
                    "${P#$D} | sed 's/^[^0-9]*//')-1)) $D;)";
     } else {
       LOG(ERROR) << "ResetStatus failed";
@@ -462,6 +524,38 @@ int UpdateEngineClient::ProcessFlags() {
       LOG(INFO) << "Target Channel (pending update): " << target_channel;
   }
 
+  if (FLAGS_apply_deferred_update) {
+    if (!client_->ApplyDeferredUpdate()) {
+      LOG(ERROR) << "Apply deferred update failed.";
+      return 1;
+    }
+    return 0;
+  }
+
+  if (FLAGS_install) {
+    if (FLAGS_dlc.empty()) {
+      LOG(ERROR) << "Must pass in a DLC when performing an install.";
+      return 1;
+    }
+
+    update_engine::InstallParams install_params;
+    install_params.set_id(FLAGS_dlc);
+    install_params.set_omaha_url(FLAGS_omaha_url);
+    install_params.set_scaled(FLAGS_scaled);
+
+    if (!client_->Install(install_params)) {
+      LOG(ERROR) << "Failed to install DLC=" << FLAGS_dlc;
+      return 1;
+    }
+
+    LOG(INFO) << "Waiting for install to complete.";
+
+    auto handler = new InstallWaitHandler(client_.get());
+    handlers_.emplace_back(handler);
+    client_->RegisterStatusUpdateHandler(handler);
+    return kContinueRunning;
+  }
+
   bool do_update_request = FLAGS_check_for_update || FLAGS_update ||
                            !FLAGS_app_version.empty() ||
                            !FLAGS_omaha_url.empty();
@@ -505,6 +599,15 @@ int UpdateEngineClient::ProcessFlags() {
     }
   }
 
+  if (!FLAGS_is_feature_enabled.empty()) {
+    bool enabled = false;
+    if (!client_->IsFeatureEnabled(FLAGS_is_feature_enabled, &enabled)) {
+      LOG(ERROR) << "Could not retrieve feature value.";
+      return 1;
+    }
+    printf("%s", enabled ? "true" : "false");
+  }
+
   // Initiate an update check, if necessary.
   if (do_update_request) {
     LOG_IF(WARNING, FLAGS_reboot) << "-reboot flag ignored.";
@@ -520,6 +623,7 @@ int UpdateEngineClient::ProcessFlags() {
     update_params.set_skip_applying(FLAGS_skip_applying);
     update_params.mutable_update_flags()->set_non_interactive(
         !FLAGS_interactive);
+    update_params.set_force_fw_update(FLAGS_force_fw_update);
     if (!client_->Update(update_params)) {
       LOG(ERROR) << "Error checking for update.";
       return 1;

@@ -18,7 +18,7 @@
 
 #include <algorithm>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <base/logging.h>
 #include <base/strings/string_util.h>
 #include <base/time/time.h>
@@ -65,8 +65,9 @@ void MockHttpFetcher::SendData(bool skip_delivery) {
     CHECK(MessageLoop::current());
     timeout_id_ = MessageLoop::current()->PostDelayedTask(
         FROM_HERE,
-        base::Bind(&MockHttpFetcher::TimeoutCallback, base::Unretained(this)),
-        base::TimeDelta::FromMilliseconds(10));
+        base::BindOnce(&MockHttpFetcher::TimeoutCallback,
+                       base::Unretained(this)),
+        base::Milliseconds(10));
   }
 
   if (!skip_delivery || !delay_) {

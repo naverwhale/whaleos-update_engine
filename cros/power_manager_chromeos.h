@@ -17,7 +17,6 @@
 #ifndef UPDATE_ENGINE_CROS_POWER_MANAGER_CHROMEOS_H_
 #define UPDATE_ENGINE_CROS_POWER_MANAGER_CHROMEOS_H_
 
-#include <base/macros.h>
 #include <power_manager/dbus-proxies.h>
 
 #include "update_engine/cros/power_manager_interface.h"
@@ -34,6 +33,7 @@ class PowerManagerChromeOS : public PowerManagerInterface {
 
   // PowerManagerInterface overrides.
   bool RequestReboot() override;
+  bool RequestShutdown() override;
 
  private:
   // Real DBus proxy using the DBus connection.

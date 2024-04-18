@@ -35,6 +35,7 @@
 #include <base/time/time.h>
 #include <brillo/key_value_store.h>
 #include <brillo/secure_blob.h>
+#include <libimageloader/manifest.h>
 
 #include "update_engine/common/action.h"
 #include "update_engine/common/action_processor.h"
@@ -45,6 +46,10 @@
 namespace chromeos_update_engine {
 
 namespace utils {
+
+// Toggles a boolean pref based on `value`.
+bool ToggleFeature(const std::string& pref, bool value);
+bool IsFeatureEnabled(const std::string& pref, bool* value);
 
 // Formats |vec_str| as a string of the form ["<elem1>", "<elem2>"].
 // Does no escaping, only use this for presentation in error messages.

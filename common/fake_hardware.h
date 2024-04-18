@@ -18,9 +18,11 @@
 #define UPDATE_ENGINE_COMMON_FAKE_HARDWARE_H_
 
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 
+#include <base/json/json_string_value_serializer.h>
 #include <base/time/time.h>
 
 #include "update_engine/common/error_code.h"
@@ -104,6 +106,24 @@ class FakeHardware : public HardwareInterface {
     return true;
   }
 
+  bool IsEnrollmentRecoveryModeEnabled(
+      const base::Value* local_state) const override {
+    return is_enrollment_recovery_enabled_;
+  }
+
+  bool IsConsumerSegmentSet(const base::Value* local_state) const override {
+    return is_consumer_segment_;
+  }
+
+  std::unique_ptr<base::Value> ReadLocalState() const override {
+    int error_code;
+    std::string error_msg;
+
+    JSONStringValueDeserializer deserializer(local_state_contents_);
+
+    return deserializer.Deserialize(&error_code, &error_msg);
+  }
+
   bool SetMaxKernelKeyRollforward(int kernel_max_rollforward) override {
     kernel_max_rollforward_ = kernel_max_rollforward;
     return true;
@@ -129,6 +149,14 @@ class FakeHardware : public HardwareInterface {
     return false;
   }
 
+  bool GetRecoveryKeyVersion(std::string* version) override {
+    if (recovery_key_version_.empty()) {
+      return false;
+    }
+    *version = recovery_key_version_;
+    return true;
+  }
+
   bool GetPowerwashSafeDirectory(base::FilePath* path) const override {
     return false;
   }
@@ -145,6 +173,10 @@ class FakeHardware : public HardwareInterface {
     first_active_omaha_ping_sent_ = true;
     return true;
   }
+
+  std::string GetActivateDate() const override { return activate_date_; }
+
+  std::string GetFsiVersion() const override { return fsi_version_; }
 
   int GetActiveMiniOsPartition() const override { return 0; }
 
@@ -180,6 +212,18 @@ class FakeHardware : public HardwareInterface {
 
   void UnsetIsOOBEComplete() { is_oobe_complete_ = false; }
 
+  void SetIsEnrollmentRecoveryMode(bool enrollment_recovery) {
+    is_enrollment_recovery_enabled_ = enrollment_recovery;
+  }
+
+  void SetIsConsumerSegment(bool consumer_segment) {
+    is_consumer_segment_ = consumer_segment;
+  }
+
+  void SetLocalState(std::string local_state) {
+    local_state_contents_ = local_state;
+  }
+
   void SetHardwareClass(const std::string& hardware_class) {
     hardware_class_ = hardware_class;
   }
@@ -206,6 +250,18 @@ class FakeHardware : public HardwareInterface {
 
   void SetWarmReset(bool warm_reset) override { warm_reset_ = warm_reset; }
 
+  void SetRecoveryKeyVersion(const std::string& version) {
+    recovery_key_version_ = version;
+  }
+
+  void SetActivateDate(const std::string& activate_date) {
+    activate_date_ = activate_date;
+  }
+
+  void SetFsiVersion(const std::string& fsi_version) {
+    fsi_version_ = fsi_version;
+  }
+
   // Getters to verify state.
   int GetMaxKernelKeyRollforward() const { return kernel_max_rollforward_; }
 
@@ -226,6 +282,23 @@ class FakeHardware : public HardwareInterface {
     return utils::IsTimestampNewer(old_version, new_version);
   }
 
+  bool IsRootfsVerificationEnabled() const override {
+    return rootfs_verification_enabled_;
+  }
+
+  bool ResetFWTryNextSlot() override {
+    if (fail_reset_fw_try_next_slot_) {
+      return false;
+    }
+
+    return reset_fw_try_next_slot_ = true;
+  }
+
+  void SetFailResetFwTryNextSlot(bool value) {
+    fail_reset_fw_try_next_slot_ = value;
+  }
+  bool IsFWTryNextSlotReset() const { return reset_fw_try_next_slot_; }
+
  private:
   bool is_official_build_{true};
   bool is_normal_boot_mode_{true};
@@ -233,6 +306,9 @@ class FakeHardware : public HardwareInterface {
   bool are_dev_features_enabled_{false};
   bool is_oobe_enabled_{true};
   bool is_oobe_complete_{true};
+  bool is_enrollment_recovery_enabled_{false};
+  bool is_consumer_segment_{false};
+  std::string local_state_contents_;
   // Jan 20, 2007
   base::Time oobe_timestamp_{base::Time::FromTimeT(1169280000)};
   std::string hardware_class_{"Fake HWID BLAH-1234"};
@@ -246,8 +322,14 @@ class FakeHardware : public HardwareInterface {
   bool save_rollback_data_{false};
   int64_t build_timestamp_{0};
   bool first_active_omaha_ping_sent_{false};
+  std::string activate_date_{""};
+  std::string fsi_version_{""};
   bool warm_reset_{false};
+  std::string recovery_key_version_;
   mutable std::map<std::string, std::string> partition_timestamps_;
+  bool rootfs_verification_enabled_{false};
+  bool reset_fw_try_next_slot_{false};
+  bool fail_reset_fw_try_next_slot_{false};
 };
 
 }  // namespace chromeos_update_engine

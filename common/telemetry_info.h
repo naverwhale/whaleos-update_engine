@@ -34,20 +34,19 @@ enum class TelemetryCategoryEnum {
   kStatefulPartition = 7,
   kBluetooth = 8,
   kSystem = 9,
-  kSystem2 = 10,
-  kNetwork = 11,
-  kAudio = 12,
-  kBootPerformance = 13,
-  kBus = 14,
+  kNetwork = 10,
+  kAudio = 11,
+  kBootPerformance = 12,
+  kBus = 13,
 };
 
 // Represents the telemetry information collected from `cros_healthd`.
 typedef struct TelemetryInfo {
-  typedef struct SystemV2Info {
+  typedef struct SystemInfo {
     typedef struct DmiInfo {
-      std::string board_vendor;
-      std::string board_name;
-      std::string board_version;
+      std::string sys_vendor;
+      std::string product_name;
+      std::string product_version;
       std::string bios_version;
     } DmiInfo;
     DmiInfo dmi_info;
@@ -62,8 +61,8 @@ typedef struct TelemetryInfo {
       BootMode boot_mode;
     } OsInfo;
     OsInfo os_info;
-  } SystemV2Info;
-  SystemV2Info system_v2_info;
+  } SystemInfo;
+  SystemInfo system_info;
 
   typedef struct MemoryInfo {
     uint32_t total_memory_kib;
@@ -108,9 +107,12 @@ typedef struct TelemetryInfo {
 
   std::string GetWirelessDrivers() const;
   std::string GetWirelessIds() const;
+  std::string GetGpuDrivers() const;
   std::string GetGpuIds() const;
 
  private:
+  std::string GetBusDeviceDrivers(
+      BusDevice::BusDeviceClass bus_device_class) const;
   std::string GetBusDeviceIds(BusDevice::BusDeviceClass bus_device_class) const;
 } TelemetryInfo;
 

@@ -19,17 +19,19 @@
 
 #include <stdint.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <base/files/file_path.h>
 #include <base/time/time.h>
+#include <base/values.h>
 
 #include "update_engine/common/error_code.h"
 
 namespace chromeos_update_engine {
 
-// The hardware interface allows access to the crossystem exposed properties,
+// The hardware interface allows access to the system properties,
 // such as the firmware version, hwid, verified boot mode.
 // These stateless functions are tied together in this interface to facilitate
 // unit testing.
@@ -70,6 +72,17 @@ class HardwareInterface {
   // Returns the OEM device requisition or an empty string if the system does
   // not have a requisition, or if not running Chrome OS.
   virtual std::string GetDeviceRequisition() const = 0;
+
+  // Returns the Local State root as base::Value
+  virtual std::unique_ptr<base::Value> ReadLocalState() const = 0;
+
+  // Returns true if enrollment recovery mode is set on
+  // given Local State
+  virtual bool IsEnrollmentRecoveryModeEnabled(
+      const base::Value* local_state) const = 0;
+
+  // Returns true if IsConsumerSegement is set on given Local State
+  virtual bool IsConsumerSegmentSet(const base::Value* local_state) const = 0;
 
   // Returns the minimum kernel key version that verified boot on Chrome OS
   // will allow to boot. This is the value of crossystem tpm_kernver. Returns
@@ -115,6 +128,10 @@ class HardwareInterface {
   // directory available, returns false.
   virtual bool GetNonVolatileDirectory(base::FilePath* path) const = 0;
 
+  // Returns the recovery key version that the device is using.
+  // If key is not found or invalid, returns empty string.
+  virtual bool GetRecoveryKeyVersion(std::string* version) = 0;
+
   // Store in |path| the path to a non-volatile directory persisted across
   // powerwash cycles. In case of an error, such as no directory available,
   // returns false.
@@ -135,6 +152,14 @@ class HardwareInterface {
   // Persist the fact that first active ping was sent to omaha and returns false
   // if failed to persist it.
   virtual bool SetFirstActiveOmahaPingSent() = 0;
+
+  // The week and year the device was activated in, if present in VPD.
+  // Format is "2023-03". Returns an empty string if not set or error.
+  virtual std::string GetActivateDate() const = 0;
+
+  // The FSI version as saved in VPD. This is an OS version, e.g. "13456.5.30".
+  // Returns an empty string if not set or error.
+  virtual std::string GetFsiVersion() const = 0;
 
   // Returns the MINIOS partition with the higher priority. 0 for A and 1 for B.
   virtual int GetActiveMiniOsPartition() const = 0;
@@ -166,6 +191,14 @@ class HardwareInterface {
   virtual ErrorCode IsPartitionUpdateValid(
       const std::string& partition_name,
       const std::string& new_version) const = 0;
+
+  // Returns true if rootfs verification is enabled.
+  // e.g. "dm_verity.dev_wait" is set to 1 in the kernel commandline.
+  virtual bool IsRootfsVerificationEnabled() const = 0;
+
+  // Resets a RW firmware partition slot to try on next boot to a current slot.
+  // Returns false on failure, true on success.
+  virtual bool ResetFWTryNextSlot() = 0;
 };
 
 }  // namespace chromeos_update_engine

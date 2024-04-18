@@ -23,6 +23,7 @@
 #include "update_engine/common/system_state.h"
 #include "update_engine/update_manager/enough_slots_ab_updates_policy_impl.h"
 #include "update_engine/update_manager/enterprise_device_policy_impl.h"
+#include "update_engine/update_manager/installation_policy_impl.h"
 #include "update_engine/update_manager/interactive_update_policy_impl.h"
 #include "update_engine/update_manager/minimum_version_policy_impl.h"
 #include "update_engine/update_manager/next_update_check_policy_impl.h"
@@ -32,6 +33,7 @@
 #include "update_engine/update_manager/recovery_policy.h"
 #include "update_engine/update_manager/shill_provider.h"
 #include "update_engine/update_manager/update_check_allowed_policy.h"
+#include "update_engine/update_manager/update_in_hibernate_resume_policy_impl.h"
 
 using chromeos_update_engine::SystemState;
 using std::string;
@@ -45,7 +47,7 @@ namespace {
 // needs to be long enough to prevent busywork and/or DDoS attacks on Omaha, but
 // at the same time short enough to allow the machine to update itself
 // reasonably soon.
-const int kCheckIntervalInSeconds = 15 * 60;
+constexpr base::TimeDelta kCheckInterval = base::Minutes(15);
 
 }  // namespace
 
@@ -62,6 +64,7 @@ EvalStatus UpdateCheckAllowedPolicy::Evaluate(EvaluationContext* ec,
   result->rollback_on_channel_downgrade = false;
   result->interactive = false;
 
+  InstallationPolicyImpl installation_policy;
   RecoveryPolicy recovery_policy;
   EnoughSlotsAbUpdatesPolicyImpl enough_slots_ab_updates_policy;
   EnterpriseDevicePolicyImpl enterprise_device_policy;
@@ -69,8 +72,15 @@ EvalStatus UpdateCheckAllowedPolicy::Evaluate(EvaluationContext* ec,
   InteractiveUpdateCheckAllowedPolicyImpl interactive_update_policy;
   OobePolicyImpl oobe_policy;
   NextUpdateCheckTimePolicyImpl next_update_check_time_policy;
+  UpdateInHibernateResumePolicyImpl hibernate_resume_policy;
 
   vector<PolicyInterface* const> policies_to_consult = {
+      // Don't update when resuming from hibernate.
+      &hibernate_resume_policy,
+
+      // If this is an installation, allow performing.
+      &installation_policy,
+
       // If in recovery mode, always check for update.
       &recovery_policy,
 
@@ -125,9 +135,8 @@ EvalStatus UpdateCheckAllowedPolicy::EvaluateDefault(
   // Ensure that the minimum interval is set. If there's no clock, this defaults
   // to always allowing the update.
   if (!aux_state_->IsLastCheckAllowedTimeSet() ||
-      ec->IsMonotonicTimeGreaterThan(
-          aux_state_->last_check_allowed_time() +
-          base::TimeDelta::FromSeconds(kCheckIntervalInSeconds))) {
+      ec->IsMonotonicTimeGreaterThan(aux_state_->last_check_allowed_time() +
+                                     kCheckInterval)) {
     aux_state_->set_last_check_allowed_time(
         SystemState::Get()->clock()->GetMonotonicTime());
     return EvalStatus::kSucceeded;

@@ -31,16 +31,18 @@
 
 namespace {
 
-const char kLsbRelease[] = "/etc/lsb-release";
+constexpr char kLsbRelease[] = "/etc/lsb-release";
 
-const char kLsbReleaseAppIdKey[] = "CHROMEOS_RELEASE_APPID";
-const char kLsbReleaseAutoUpdateServerKey[] = "CHROMEOS_AUSERVER";
-const char kLsbReleaseBoardAppIdKey[] = "CHROMEOS_BOARD_APPID";
-const char kLsbReleaseBoardKey[] = "CHROMEOS_RELEASE_BOARD";
-const char kLsbReleaseCanaryAppIdKey[] = "CHROMEOS_CANARY_APPID";
-const char kLsbReleaseIsPowerwashAllowedKey[] = "CHROMEOS_IS_POWERWASH_ALLOWED";
-const char kLsbReleaseUpdateChannelKey[] = "CHROMEOS_RELEASE_TRACK";
-const char kLsbReleaseVersionKey[] = "CHROMEOS_RELEASE_VERSION";
+constexpr char kLsbReleaseAppIdKey[] = "CHROMEOS_RELEASE_APPID";
+constexpr char kLsbReleaseAutoUpdateServerKey[] = "CHROMEOS_AUSERVER";
+constexpr char kLsbReleaseBoardAppIdKey[] = "CHROMEOS_BOARD_APPID";
+constexpr char kLsbReleaseBoardKey[] = "CHROMEOS_RELEASE_BOARD";
+constexpr char kLsbReleaseBuilderPath[] = "CHROMEOS_RELEASE_BUILDER_PATH";
+constexpr char kLsbReleaseCanaryAppIdKey[] = "CHROMEOS_CANARY_APPID";
+constexpr char kLsbReleaseIsPowerwashAllowedKey[] =
+    "CHROMEOS_IS_POWERWASH_ALLOWED";
+constexpr char kLsbReleaseUpdateChannelKey[] = "CHROMEOS_RELEASE_TRACK";
+constexpr char kLsbReleaseVersionKey[] = "CHROMEOS_RELEASE_VERSION";
 
 const char kDefaultAppId[] = "{87efface-864d-49a5-9bb3-4b050a7c227a}";
 
@@ -92,7 +94,7 @@ ImageProperties LoadImageProperties() {
   brillo::KeyValueStore lsb_release;
   LoadLsbRelease(LsbReleaseSource::kSystem, &lsb_release);
   result.current_channel = GetStringWithDefault(
-      lsb_release, kLsbReleaseUpdateChannelKey, "stable-channel");
+      lsb_release, kLsbReleaseUpdateChannelKey, kStableChannel);
 
   // In dev-mode and unofficial build we can override the image properties set
   // in the system image with the ones from the stateful partition, except the
@@ -117,6 +119,8 @@ ImageProperties LoadImageProperties() {
       GetStringWithDefault(lsb_release,
                            kLsbReleaseAutoUpdateServerKey,
                            constants::kOmahaDefaultProductionURL);
+  result.builder_path =
+      GetStringWithDefault(lsb_release, kLsbReleaseBuilderPath, "");
   // Build fingerprint not used in Chrome OS.
   result.build_fingerprint = "";
   result.allow_arbitrary_channels = false;
@@ -130,7 +134,7 @@ MutableImageProperties LoadMutableImageProperties() {
   LoadLsbRelease(LsbReleaseSource::kSystem, &lsb_release);
   LoadLsbRelease(LsbReleaseSource::kStateful, &lsb_release);
   result.target_channel = GetStringWithDefault(
-      lsb_release, kLsbReleaseUpdateChannelKey, "stable-channel");
+      lsb_release, kLsbReleaseUpdateChannelKey, kStableChannel);
   if (!lsb_release.GetBoolean(kLsbReleaseIsPowerwashAllowedKey,
                               &result.is_powerwash_allowed))
     result.is_powerwash_allowed = false;

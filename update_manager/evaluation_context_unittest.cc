@@ -19,7 +19,7 @@
 #include <memory>
 #include <string>
 
-#include <base/bind.h>
+#include <base/functional/bind.h>
 #include <brillo/message_loops/fake_message_loop.h>
 #include <brillo/message_loops/message_loop_utils.h>
 #include <gtest/gtest.h>
@@ -31,8 +31,6 @@
 #include "update_engine/update_manager/mock_variable.h"
 #include "update_engine/update_manager/umtest_utils.h"
 
-using base::Bind;
-using base::Closure;
 using base::Time;
 using base::TimeDelta;
 using brillo::MessageLoop;
@@ -67,7 +65,7 @@ void ReadVar(shared_ptr<EvaluationContext> ec, Variable<T>* var) {
 
 // Runs |evaluation|; if the value pointed by |count_p| is greater than zero,
 // decrement it and schedule a reevaluation; otherwise, writes true to |done_p|.
-void EvaluateRepeatedly(Closure evaluation,
+void EvaluateRepeatedly(base::RepeatingClosure evaluation,
                         shared_ptr<EvaluationContext> ec,
                         int* count_p,
                         bool* done_p) {
@@ -75,7 +73,8 @@ void EvaluateRepeatedly(Closure evaluation,
 
   // Schedule reevaluation if needed.
   if (*count_p > 0) {
-    Closure closure = Bind(EvaluateRepeatedly, evaluation, ec, count_p, done_p);
+    base::RepeatingClosure closure = base::BindRepeating(
+        EvaluateRepeatedly, evaluation, ec, count_p, done_p);
     ASSERT_TRUE(ec->RunOnValueChangeOrTimeout(closure))
         << "Failed to schedule reevaluation, count_p=" << *count_p;
     (*count_p)--;
@@ -122,7 +121,7 @@ class UmEvaluationContextTest : public ::testing::Test {
     EXPECT_FALSE(loop_.PendingTasks());
   }
 
-  TimeDelta default_timeout_ = TimeDelta::FromSeconds(5);
+  TimeDelta default_timeout_ = base::Seconds(5);
 
   brillo::FakeMessageLoop loop_{nullptr};
   FakeClock* fake_clock_;
@@ -135,8 +134,7 @@ class UmEvaluationContextTest : public ::testing::Test {
   FakeVariable<int> fake_int_var_ = {"fake_int", kVariableModePoll};
   FakeVariable<string> fake_async_var_ = {"fake_async", kVariableModeAsync};
   FakeVariable<string> fake_const_var_ = {"fake_const", kVariableModeConst};
-  FakeVariable<string> fake_poll_var_ = {"fake_poll",
-                                         TimeDelta::FromSeconds(1)};
+  FakeVariable<string> fake_poll_var_ = {"fake_poll", base::Seconds(1)};
   StrictMock<MockVariable<string>> mock_var_async_{"mock_var_async",
                                                    kVariableModeAsync};
   StrictMock<MockVariable<string>> mock_var_poll_{"mock_var_poll",
@@ -219,7 +217,8 @@ TEST_F(UmEvaluationContextTest, RunOnValueChangeOrTimeoutWithVariables) {
   eval_ctx_->GetValue(&fake_async_var_);
 
   bool value = false;
-  EXPECT_TRUE(eval_ctx_->RunOnValueChangeOrTimeout(Bind(&SetTrue, &value)));
+  EXPECT_TRUE(
+      eval_ctx_->RunOnValueChangeOrTimeout(base::BindOnce(&SetTrue, &value)));
   // Check that the scheduled callback isn't run until we signal a ValueChaged.
   MessageLoopRunMaxIterations(MessageLoop::current(), 100);
   EXPECT_FALSE(value);
@@ -238,8 +237,10 @@ TEST_F(UmEvaluationContextTest, RunOnValueChangeOrTimeoutCalledTwice) {
   eval_ctx_->GetValue(&fake_async_var_);
 
   bool value = false;
-  EXPECT_TRUE(eval_ctx_->RunOnValueChangeOrTimeout(Bind(&SetTrue, &value)));
-  EXPECT_FALSE(eval_ctx_->RunOnValueChangeOrTimeout(Bind(&SetTrue, &value)));
+  EXPECT_TRUE(
+      eval_ctx_->RunOnValueChangeOrTimeout(base::BindOnce(&SetTrue, &value)));
+  EXPECT_FALSE(
+      eval_ctx_->RunOnValueChangeOrTimeout(base::BindOnce(&SetTrue, &value)));
 
   // The scheduled event should still work.
   fake_async_var_.NotifyValueChanged();
@@ -253,13 +254,14 @@ TEST_F(UmEvaluationContextTest, RunOnValueChangeOrTimeoutRunsFromTimeout) {
   eval_ctx_->GetValue(&fake_poll_var_);
 
   bool value = false;
-  EXPECT_TRUE(eval_ctx_->RunOnValueChangeOrTimeout(Bind(&SetTrue, &value)));
+  EXPECT_TRUE(
+      eval_ctx_->RunOnValueChangeOrTimeout(base::BindOnce(&SetTrue, &value)));
   // Check that the scheduled callback isn't run until the timeout occurs.
   MessageLoopRunMaxIterations(MessageLoop::current(), 10);
   EXPECT_FALSE(value);
   MessageLoopRunUntil(MessageLoop::current(),
-                      TimeDelta::FromSeconds(10),
-                      Bind(&GetBoolean, &value));
+                      base::Seconds(10),
+                      base::BindRepeating(&GetBoolean, &value));
   EXPECT_TRUE(value);
 }
 
@@ -270,13 +272,14 @@ TEST_F(UmEvaluationContextTest, RunOnValueChangeOrTimeoutExpires) {
   eval_ctx_->GetValue(&fake_async_var_);
 
   bool value = false;
-  EXPECT_TRUE(eval_ctx_->RunOnValueChangeOrTimeout(Bind(&SetTrue, &value)));
+  EXPECT_TRUE(
+      eval_ctx_->RunOnValueChangeOrTimeout(base::BindOnce(&SetTrue, &value)));
   // Check that the scheduled callback isn't run until the timeout occurs.
   MessageLoopRunMaxIterations(MessageLoop::current(), 10);
   EXPECT_FALSE(value);
   MessageLoopRunUntil(MessageLoop::current(),
-                      TimeDelta::FromSeconds(10),
-                      Bind(&GetBoolean, &value));
+                      base::Seconds(10),
+                      base::BindRepeating(&GetBoolean, &value));
   EXPECT_TRUE(value);
 
   // Ensure that we cannot reschedule an evaluation.
@@ -293,7 +296,8 @@ TEST_F(UmEvaluationContextTest, RemoveObserversAndTimeoutTest) {
   eval_ctx_->GetValue(&fake_async_var_);
 
   bool value = false;
-  EXPECT_TRUE(eval_ctx_->RunOnValueChangeOrTimeout(Bind(&SetTrue, &value)));
+  EXPECT_TRUE(
+      eval_ctx_->RunOnValueChangeOrTimeout(base::BindOnce(&SetTrue, &value)));
   eval_ctx_ = nullptr;
 
   // This should not trigger the callback since the EvaluationContext waiting
@@ -307,7 +311,8 @@ TEST_F(UmEvaluationContextTest, RemoveObserversAndTimeoutTest) {
 TEST_F(UmEvaluationContextTest,
        RunOnValueChangeOrTimeoutReevaluatesRepeatedly) {
   fake_poll_var_.reset(new string("Polled value"));
-  Closure evaluation = Bind(ReadVar<string>, eval_ctx_, &fake_poll_var_);
+  base::RepeatingClosure evaluation =
+      base::BindRepeating(ReadVar<string>, eval_ctx_, &fake_poll_var_);
   int num_reevaluations = 2;
   bool done = false;
 
@@ -315,12 +320,12 @@ TEST_F(UmEvaluationContextTest,
   evaluation.Run();
 
   // Schedule repeated reevaluations.
-  Closure closure = Bind(
+  base::RepeatingClosure closure = base::BindRepeating(
       EvaluateRepeatedly, evaluation, eval_ctx_, &num_reevaluations, &done);
   ASSERT_TRUE(eval_ctx_->RunOnValueChangeOrTimeout(closure));
   MessageLoopRunUntil(MessageLoop::current(),
-                      TimeDelta::FromSeconds(10),
-                      Bind(&GetBoolean, &done));
+                      base::Seconds(10),
+                      base::BindRepeating(&GetBoolean, &done));
   EXPECT_EQ(0, num_reevaluations);
 }
 
@@ -339,19 +344,20 @@ TEST_F(UmEvaluationContextTest, ObjectDeletedWithPendingEventsTest) {
 // crash.
 TEST_F(UmEvaluationContextTest, TimeoutEventAfterDeleteTest) {
   FakeVariable<string> fake_short_poll_var = {"fake_short_poll",
-                                              TimeDelta::FromSeconds(1)};
+                                              base::Seconds(1)};
   fake_short_poll_var.reset(new string("Polled value"));
   eval_ctx_->GetValue(&fake_short_poll_var);
   bool value = false;
-  EXPECT_TRUE(eval_ctx_->RunOnValueChangeOrTimeout(Bind(&SetTrue, &value)));
+  EXPECT_TRUE(
+      eval_ctx_->RunOnValueChangeOrTimeout(base::BindOnce(&SetTrue, &value)));
   // Remove the last reference to the EvaluationContext and run the loop for
   // 10 seconds to give time to the main loop to trigger the timeout Event (of 1
   // second). Our callback should not be called because the EvaluationContext
   // was removed before the timeout event is attended.
   eval_ctx_ = nullptr;
   MessageLoopRunUntil(MessageLoop::current(),
-                      TimeDelta::FromSeconds(10),
-                      Bind(&GetBoolean, &value));
+                      base::Seconds(10),
+                      base::BindRepeating(&GetBoolean, &value));
   EXPECT_FALSE(value);
 }
 
@@ -365,9 +371,9 @@ TEST_F(UmEvaluationContextTest, DefaultTimeout) {
 
 TEST_F(UmEvaluationContextTest, TimeoutUpdatesWithMonotonicTime) {
   fake_clock_->SetMonotonicTime(fake_clock_->GetMonotonicTime() +
-                                TimeDelta::FromSeconds(1));
+                                base::Seconds(1));
 
-  TimeDelta timeout = default_timeout_ - TimeDelta::FromSeconds(1);
+  TimeDelta timeout = default_timeout_ - base::Seconds(1);
 
   EXPECT_CALL(mock_var_async_, GetValue(timeout, _)).WillOnce(Return(nullptr));
   EXPECT_EQ(nullptr, eval_ctx_->GetValue(&mock_var_async_));
@@ -376,49 +382,49 @@ TEST_F(UmEvaluationContextTest, TimeoutUpdatesWithMonotonicTime) {
 TEST_F(UmEvaluationContextTest, ResetEvaluationResetsTimesWallclock) {
   Time cur_time = fake_clock_->GetWallclockTime();
   // Advance the time on the clock but don't call ResetEvaluation yet.
-  fake_clock_->SetWallclockTime(cur_time + TimeDelta::FromSeconds(4));
+  fake_clock_->SetWallclockTime(cur_time + base::Seconds(4));
 
-  EXPECT_TRUE(eval_ctx_->IsWallclockTimeGreaterThan(cur_time -
-                                                    TimeDelta::FromSeconds(1)));
+  EXPECT_TRUE(
+      eval_ctx_->IsWallclockTimeGreaterThan(cur_time - base::Seconds(1)));
   EXPECT_FALSE(eval_ctx_->IsWallclockTimeGreaterThan(cur_time));
-  EXPECT_FALSE(eval_ctx_->IsWallclockTimeGreaterThan(
-      cur_time + TimeDelta::FromSeconds(1)));
+  EXPECT_FALSE(
+      eval_ctx_->IsWallclockTimeGreaterThan(cur_time + base::Seconds(1)));
   // Call ResetEvaluation now, which should use the new evaluation time.
   eval_ctx_->ResetEvaluation();
 
   cur_time = fake_clock_->GetWallclockTime();
-  EXPECT_TRUE(eval_ctx_->IsWallclockTimeGreaterThan(cur_time -
-                                                    TimeDelta::FromSeconds(1)));
+  EXPECT_TRUE(
+      eval_ctx_->IsWallclockTimeGreaterThan(cur_time - base::Seconds(1)));
   EXPECT_FALSE(eval_ctx_->IsWallclockTimeGreaterThan(cur_time));
-  EXPECT_FALSE(eval_ctx_->IsWallclockTimeGreaterThan(
-      cur_time + TimeDelta::FromSeconds(1)));
+  EXPECT_FALSE(
+      eval_ctx_->IsWallclockTimeGreaterThan(cur_time + base::Seconds(1)));
 }
 
 TEST_F(UmEvaluationContextTest, ResetEvaluationResetsTimesMonotonic) {
   Time cur_time = fake_clock_->GetMonotonicTime();
   // Advance the time on the clock but don't call ResetEvaluation yet.
-  fake_clock_->SetMonotonicTime(cur_time + TimeDelta::FromSeconds(4));
+  fake_clock_->SetMonotonicTime(cur_time + base::Seconds(4));
 
-  EXPECT_TRUE(eval_ctx_->IsMonotonicTimeGreaterThan(cur_time -
-                                                    TimeDelta::FromSeconds(1)));
+  EXPECT_TRUE(
+      eval_ctx_->IsMonotonicTimeGreaterThan(cur_time - base::Seconds(1)));
   EXPECT_FALSE(eval_ctx_->IsMonotonicTimeGreaterThan(cur_time));
-  EXPECT_FALSE(eval_ctx_->IsMonotonicTimeGreaterThan(
-      cur_time + TimeDelta::FromSeconds(1)));
+  EXPECT_FALSE(
+      eval_ctx_->IsMonotonicTimeGreaterThan(cur_time + base::Seconds(1)));
   // Call ResetEvaluation now, which should use the new evaluation time.
   eval_ctx_->ResetEvaluation();
 
   cur_time = fake_clock_->GetMonotonicTime();
-  EXPECT_TRUE(eval_ctx_->IsMonotonicTimeGreaterThan(cur_time -
-                                                    TimeDelta::FromSeconds(1)));
+  EXPECT_TRUE(
+      eval_ctx_->IsMonotonicTimeGreaterThan(cur_time - base::Seconds(1)));
   EXPECT_FALSE(eval_ctx_->IsMonotonicTimeGreaterThan(cur_time));
-  EXPECT_FALSE(eval_ctx_->IsMonotonicTimeGreaterThan(
-      cur_time + TimeDelta::FromSeconds(1)));
+  EXPECT_FALSE(
+      eval_ctx_->IsMonotonicTimeGreaterThan(cur_time + base::Seconds(1)));
 }
 
 TEST_F(UmEvaluationContextTest,
        IsWallclockTimeGreaterThanSignalsTriggerReevaluation) {
   EXPECT_FALSE(eval_ctx_->IsWallclockTimeGreaterThan(
-      fake_clock_->GetWallclockTime() + TimeDelta::FromSeconds(1)));
+      fake_clock_->GetWallclockTime() + base::Seconds(1)));
 
   // The "false" from IsWallclockTimeGreaterThan means that's not that timestamp
   // yet, so this should schedule a callback for when that happens.
@@ -428,7 +434,7 @@ TEST_F(UmEvaluationContextTest,
 TEST_F(UmEvaluationContextTest,
        IsMonotonicTimeGreaterThanSignalsTriggerReevaluation) {
   EXPECT_FALSE(eval_ctx_->IsMonotonicTimeGreaterThan(
-      fake_clock_->GetMonotonicTime() + TimeDelta::FromSeconds(1)));
+      fake_clock_->GetMonotonicTime() + base::Seconds(1)));
 
   // The "false" from IsMonotonicTimeGreaterThan means that's not that timestamp
   // yet, so this should schedule a callback for when that happens.
@@ -440,9 +446,9 @@ TEST_F(UmEvaluationContextTest,
   // IsWallclockTimeGreaterThan() should ignore timestamps on the past for
   // reevaluation.
   EXPECT_TRUE(eval_ctx_->IsWallclockTimeGreaterThan(
-      fake_clock_->GetWallclockTime() - TimeDelta::FromSeconds(20)));
+      fake_clock_->GetWallclockTime() - base::Seconds(20)));
   EXPECT_TRUE(eval_ctx_->IsWallclockTimeGreaterThan(
-      fake_clock_->GetWallclockTime() - TimeDelta::FromSeconds(1)));
+      fake_clock_->GetWallclockTime() - base::Seconds(1)));
 
   // Callback should not be scheduled.
   EXPECT_FALSE(eval_ctx_->RunOnValueChangeOrTimeout({}));
@@ -453,9 +459,9 @@ TEST_F(UmEvaluationContextTest,
   // IsMonotonicTimeGreaterThan() should ignore timestamps on the past for
   // reevaluation.
   EXPECT_TRUE(eval_ctx_->IsMonotonicTimeGreaterThan(
-      fake_clock_->GetMonotonicTime() - TimeDelta::FromSeconds(20)));
+      fake_clock_->GetMonotonicTime() - base::Seconds(20)));
   EXPECT_TRUE(eval_ctx_->IsMonotonicTimeGreaterThan(
-      fake_clock_->GetMonotonicTime() - TimeDelta::FromSeconds(1)));
+      fake_clock_->GetMonotonicTime() - base::Seconds(1)));
 
   // Callback should not be scheduled.
   EXPECT_FALSE(eval_ctx_->RunOnValueChangeOrTimeout({}));
